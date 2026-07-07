@@ -1,0 +1,40 @@
+name: Build HorizonFix
+
+on:
+    push:
+        branches:
+            - main
+    pull_request:
+        branches:
+            - main
+
+jobs:
+    build:
+        runs-on: windows-2022
+
+        steps:
+            - uses: ilammy/msvc-dev-cmd@v1
+              with:
+                  arch: amd64
+
+            - name: Checkout Repository
+              uses: actions/checkout@v4
+              with:
+                  submodules: true
+                  fetch-depth: 0
+
+            - name: Build Artifact
+              run: |
+                  ./buildRelease.ps1
+
+            - name: Upload Artifact SE
+              uses: actions/upload-artifact@v4
+              with:
+                  name: HorizonFix-SE-${{ github.sha }}
+                  path: dist/se
+
+            - name: Upload Artifact AE
+              uses: actions/upload-artifact@v4
+              with:
+                  name: HorizonFix-AE-${{ github.sha }}
+                  path: dist/ae

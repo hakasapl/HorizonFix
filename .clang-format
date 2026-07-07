@@ -1,0 +1,8 @@
+BasedOnStyle: WebKit
+ColumnLimit: 120
+BinPackArguments: false
+BinPackParameters: AlwaysOnePerLine
+BinPackLongBracedList: false
+AlignAfterOpenBracket: true
+AllowAllParametersOfDeclarationOnNextLine: false
+Cpp11BracedListStyle: true
