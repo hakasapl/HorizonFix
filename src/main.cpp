@@ -67,6 +67,10 @@ void messageHandler(SKSE::MessagingInterface::Message* msg)
             holder->AddEventSink(CellAttachSink::getSingleton());
             spdlog::info("Water skirt: registered cell attach listener");
         }
+        if (auto* const ui = RE::UI::GetSingleton()) {
+            ui->AddEventSink(MapMenuSink::getSingleton());
+            spdlog::info("Water skirt: registered map menu listener");
+        }
         break;
     case SKSE::MessagingInterface::kPostLoadGame:
     case SKSE::MessagingInterface::kNewGame:

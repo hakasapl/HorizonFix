@@ -28,6 +28,7 @@ private:
     static inline float s_modelSide;
     static inline float s_skirtHeight;
     static inline std::atomic_bool s_taskPending;
+    static inline bool s_mapMenuOpen = false;
 
     // BTR water meshes follow shorelines, so most are irregular; a 4-vertex tri
     // shape is a clean full rectangle, and the largest one is a fully submerged
@@ -42,6 +43,13 @@ public:
     static void queueUpdate();
 
     static void updateVisibility();
+
+    // Hide the whole skirt while the map menu is up. The local map renders the
+    // world through its own camera, where the skirt's cull-proof tiles and the
+    // per-draw depth hook have no business (and crash the local map). Driven by
+    // a menu event rather than a per-frame check because the map pauses the
+    // game, so the Atmosphere update that ticks updateVisibility stops firing.
+    static void setMapMenuOpen(bool open);
 
 private:
     static auto getLODWorldSpace(RE::TESWorldSpace* worldSpacePtr) -> RE::TESWorldSpace*;
@@ -77,6 +85,25 @@ public:
     {
         if ((event != nullptr) && event->attached) {
             WaterSkirt::queueUpdate();
+        }
+        return RE::BSEventNotifyControl::kContinue;
+    }
+};
+
+class MapMenuSink final : public RE::BSTEventSink<RE::MenuOpenCloseEvent> {
+public:
+    static auto getSingleton() -> MapMenuSink*
+    {
+        static MapMenuSink sink;
+        return &sink;
+    }
+
+    auto ProcessEvent(const RE::MenuOpenCloseEvent* event,
+                      RE::BSTEventSource<RE::MenuOpenCloseEvent>* /*a_eventSource*/)
+        -> RE::BSEventNotifyControl override
+    {
+        if ((event != nullptr) && event->menuName == RE::MapMenu::MENU_NAME) {
+            WaterSkirt::setMapMenuOpen(event->opening);
         }
         return RE::BSEventNotifyControl::kContinue;
     }

@@ -84,6 +84,9 @@ void WaterSkirt::updateVisibility()
     if (s_tiles.empty()) {
         return;
     }
+    if (s_mapMenuOpen) {
+        return; // skirt is hidden at the root while the map is up
+    }
 
     auto* const camera = RE::Main::WorldRootCamera();
     if (camera == nullptr) {
@@ -125,6 +128,25 @@ void WaterSkirt::updateVisibility()
         if (tile->flags.any(RE::NiAVObject::Flag::kHidden) == visible) {
             tile->SetAppCulled(!visible);
         }
+    }
+}
+
+void WaterSkirt::setMapMenuOpen(bool open)
+{
+    s_mapMenuOpen = open;
+
+    // One flag on the root hides every tile at once, and the renderer never
+    // descends into a culled node, so the depth hook never fires for the skirt
+    // on the map either. Per-tile visibility is left as-is; it is refreshed on
+    // the next updateVisibility once the map closes.
+    if (s_skirtRoot) {
+        s_skirtRoot->SetAppCulled(open);
+    }
+
+    // Fast-travelling straight from the map can drop us into a new
+    // worldspace/block while hidden; re-check the skirt on the way out.
+    if (!open) {
+        queueUpdate();
     }
 }
 
@@ -352,6 +374,12 @@ void WaterSkirt::updateSkirt()
     placeTiles(centerBx, centerBy);
     s_centerBx = centerBx;
     s_centerBy = centerBy;
+
+    // A rebuild that lands while the map is still up must stay hidden until it
+    // closes (setMapMenuOpen will reveal it then).
+    if (s_mapMenuOpen) {
+        s_skirtRoot->SetAppCulled(true);
+    }
 
     auto* const lodWorldSpace = getLODWorldSpace(worldSpace);
     spdlog::info("Water skirt built for {}: {} tiles, radius {}, ocean height "
