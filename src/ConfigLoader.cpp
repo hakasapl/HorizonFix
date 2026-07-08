@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <algorithm>
 #include <array>
 #include <cwchar>
 #include <filesystem>
@@ -16,6 +17,10 @@ void ConfigLoader::loadConfig()
     s_config.skirtRadius = readIniFloat(path.c_str(), L"fWaterSkirtRadius", DEFAULT_RADIUS);
     s_config.skirtZOffset = readIniFloat(path.c_str(), L"fWaterSkirtZOffset", DEFAULT_Z_OFFSET);
     s_config.waterDrawLast = readIniFloat(path.c_str(), L"bWaterSkirtDrawLast", DEFAULT_WATER_DRAW_LAST) != 0.0F;
+    s_config.rimQuality = std::clamp(
+        static_cast<int>(readIniFloat(path.c_str(), L"iWaterSkirtRimQuality", DEFAULT_RIM_QUALITY)),
+        0,
+        MAX_RIM_QUALITY);
 
     // Pre-0.2 configs set the global far clip plane through this key; the
     // skirt now fits itself inside the vanilla far clip instead, so the value
@@ -27,6 +32,7 @@ void ConfigLoader::loadConfig()
     spdlog::info("Config Loaded: Water Skirt Radius: {}", s_config.skirtRadius);
     spdlog::info("Config Loaded: Water Skirt Z Offset: {}", s_config.skirtZOffset);
     spdlog::info("Config Loaded: Water Skirt Draw Last: {}", s_config.waterDrawLast);
+    spdlog::info("Config Loaded: Water Skirt Rim Quality: {}", s_config.rimQuality);
 }
 
 auto ConfigLoader::getSkirtRadius() -> float { return s_config.skirtRadius; }
@@ -34,6 +40,8 @@ auto ConfigLoader::getSkirtRadius() -> float { return s_config.skirtRadius; }
 auto ConfigLoader::getSkirtZOffset() -> float { return s_config.skirtZOffset; }
 
 auto ConfigLoader::getWaterDrawLast() -> bool { return s_config.waterDrawLast; }
+
+auto ConfigLoader::getRimQuality() -> int { return s_config.rimQuality; }
 
 auto ConfigLoader::readIniFloat(const wchar_t* path,
                                 const wchar_t* key,

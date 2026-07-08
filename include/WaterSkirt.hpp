@@ -9,7 +9,6 @@ public:
 
 private:
     static constexpr float K_TILE_SIZE = 131072.0F; // LOD32 size
-    static constexpr int K_RIM_SUBDIVISIONS = 4;
     static constexpr float K_CULL_PROOF_RADIUS = 1.0e9F;
 
     struct RelTile {
@@ -62,6 +61,12 @@ private:
     static auto cloneTemplate(RE::BSTriShape* templatePtr) -> RE::NiPointer<RE::BSGeometry>;
 
     static auto effectiveRadius() -> float;
+
+    static void layoutTile(float dx,
+                           float dy,
+                           float size,
+                           int splitsLeft,
+                           float radius);
 
     static void buildLayout();
 

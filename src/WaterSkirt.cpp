@@ -135,16 +135,10 @@ void WaterSkirt::setMapMenuOpen(bool open)
 {
     s_mapMenuOpen = open;
 
-    // One flag on the root hides every tile at once, and the renderer never
-    // descends into a culled node, so the depth hook never fires for the skirt
-    // on the map either. Per-tile visibility is left as-is; it is refreshed on
-    // the next updateVisibility once the map closes.
     if (s_skirtRoot) {
         s_skirtRoot->SetAppCulled(open);
     }
 
-    // Fast-travelling straight from the map can drop us into a new
-    // worldspace/block while hidden; re-check the skirt on the way out.
     if (!open) {
         queueUpdate();
     }
@@ -152,12 +146,42 @@ void WaterSkirt::setMapMenuOpen(bool open)
 
 auto WaterSkirt::effectiveRadius() -> float
 {
-    // The true horizon distance. The tiles keep their real world positions so
-    // all distance-based shading (fog, wave fade, ENB water effects) sees the
-    // same values as the neighboring vanilla LOD water; the far clip plane is
-    // handled at draw time instead (see SkirtDepth).
     constexpr float CLAMP = 4.0F;
     return std::max(ConfigLoader::getSkirtRadius(), CLAMP * K_TILE_SIZE);
+}
+
+void WaterSkirt::layoutTile(float dx,
+                            float dy,
+                            float size,
+                            int splitsLeft,
+                            float radius)
+{
+    const float half = size * 0.5F;
+
+    const float nearCorner = std::hypot(std::max(std::fabs(dx) - half, 0.0F), std::max(std::fabs(dy) - half, 0.0F));
+    if (nearCorner > radius) {
+        return; // entire tile outside the window
+    }
+
+    const float farCorner = std::hypot(std::fabs(dx) + half, std::fabs(dy) + half);
+    if (farCorner <= radius) {
+        s_layout.push_back(RelTile {.dx = dx, .dy = dy, .size = size});
+        return;
+    }
+
+    if (splitsLeft <= 0) {
+        if (std::hypot(dx, dy) <= radius) {
+            s_layout.push_back(RelTile {.dx = dx, .dy = dy, .size = size});
+        }
+        return;
+    }
+
+    const float quarter = size * 0.25F;
+    for (const float sx : {-quarter, quarter}) {
+        for (const float sy : {-quarter, quarter}) {
+            layoutTile(dx + sx, dy + sy, half, splitsLeft - 1, radius);
+        }
+    }
 }
 
 void WaterSkirt::buildLayout()
@@ -165,67 +189,20 @@ void WaterSkirt::buildLayout()
     s_layout.clear();
 
     const float radius = effectiveRadius();
-    const float rimStart = radius - (1.5F * K_TILE_SIZE);
-    const float fineSize = K_TILE_SIZE / static_cast<float>(K_RIM_SUBDIVISIONS);
+    const int quality = ConfigLoader::getRimQuality();
     const int span = static_cast<int>(std::ceil(radius / K_TILE_SIZE)) + 1;
 
     for (int ix = -span; ix <= span; ++ix) {
         for (int iy = -span; iy <= span; ++iy) {
-            // Never place tiles around the player: the carpet below the water
-            // plane is invisible at distance but not from up close, and the
-            // loaded-cell area has real water anyway.
             if (std::abs(ix) <= 1 && std::abs(iy) <= 1) {
                 continue;
             }
 
-            const float dx = static_cast<float>(ix) * K_TILE_SIZE;
-            const float dy = static_cast<float>(iy) * K_TILE_SIZE;
-
-            const float nearCorner = std::hypot(std::max(std::fabs(dx) - (K_TILE_SIZE * 0.5F), 0.0F),
-                                                std::max(std::fabs(dy) - (K_TILE_SIZE * 0.5F), 0.0F));
-            if (nearCorner > radius) {
-                continue; // entire tile outside the window
-            }
-
-            const float farCorner
-                = std::hypot(std::fabs(dx) + (K_TILE_SIZE * 0.5F), std::fabs(dy) + (K_TILE_SIZE * 0.5F));
-            if (farCorner <= rimStart) {
-                s_layout.push_back(RelTile {.dx = dx, .dy = dy, .size = K_TILE_SIZE});
-                continue;
-            }
-
-            // Rim band: subdivide so the circular edge is smooth; tiles that the
-            // boundary itself crosses get one more level of subdivision.
-            const float microSize = fineSize / static_cast<float>(K_RIM_SUBDIVISIONS);
-            for (int fx = 0; fx < K_RIM_SUBDIVISIONS; ++fx) {
-                for (int fy = 0; fy < K_RIM_SUBDIVISIONS; ++fy) {
-                    const float fdx = dx - (K_TILE_SIZE * 0.5F) + ((static_cast<float>(fx) + 0.5F) * fineSize);
-                    const float fdy = dy - (K_TILE_SIZE * 0.5F) + ((static_cast<float>(fy) + 0.5F) * fineSize);
-
-                    const float fineNear = std::hypot(std::max(std::fabs(fdx) - (fineSize * 0.5F), 0.0F),
-                                                      std::max(std::fabs(fdy) - (fineSize * 0.5F), 0.0F));
-                    if (fineNear > radius) {
-                        continue; // fully outside
-                    }
-                    const float fineFar
-                        = std::hypot(std::fabs(fdx) + (fineSize * 0.5F), std::fabs(fdy) + (fineSize * 0.5F));
-                    if (fineFar <= radius) {
-                        s_layout.push_back(RelTile {.dx = fdx, .dy = fdy, .size = fineSize});
-                        continue;
-                    }
-
-                    // Boundary-crossing tile: fill up to the circle with micro tiles.
-                    for (int mx = 0; mx < K_RIM_SUBDIVISIONS; ++mx) {
-                        for (int my = 0; my < K_RIM_SUBDIVISIONS; ++my) {
-                            const float mdx = fdx - (fineSize * 0.5F) + ((static_cast<float>(mx) + 0.5F) * microSize);
-                            const float mdy = fdy - (fineSize * 0.5F) + ((static_cast<float>(my) + 0.5F) * microSize);
-                            if (std::hypot(mdx, mdy) <= radius) {
-                                s_layout.push_back(RelTile {.dx = mdx, .dy = mdy, .size = microSize});
-                            }
-                        }
-                    }
-                }
-            }
+            layoutTile(static_cast<float>(ix) * K_TILE_SIZE,
+                       static_cast<float>(iy) * K_TILE_SIZE,
+                       K_TILE_SIZE,
+                       quality,
+                       radius);
         }
     }
 }
@@ -311,11 +288,6 @@ void WaterSkirt::updateSkirt()
         return;
     }
 
-    // Carpet depth below the detected LOD ocean plane. The template quad's
-    // world height is the authoritative ocean level of the CURRENT worldspace
-    // (Tamriel: 0 — its NAM4 record lies and says -14000), so modded
-    // worldspaces with different sea levels get the same relative depth
-    // instead of an absolute height that could land above their water.
     const float oceanHeight = templateQuad->worldBound.center.z;
     s_skirtHeight = oceanHeight + ConfigLoader::getSkirtZOffset();
 
@@ -329,21 +301,6 @@ void WaterSkirt::updateSkirt()
     }
     s_skirtRoot->name = K_ROOT_NAME;
 
-    // Attach under the LandLOD node, not the WaterLOD node, so the skirt
-    // draws right AFTER the game's own LOD water instead of before it.
-    // Mechanics (verified in SkyrimSE 1.5.97): all water renders in one
-    // sweep of per-technique pass lists, and the tiles - clones of the
-    // game's LOD water shapes - share the vanilla LOD water technique, so
-    // they land in the same list as the game's tiles. Those lists are
-    // head-inserted (LIFO): whatever registers LAST draws FIRST, and
-    // registration follows scene-graph traversal order. Under the WaterLOD
-    // node the skirt could register after the BTR containers and become the
-    // frame's first water draws - before any normal water has filled the
-    // shader constants ENB's enhanced LOD water reads (reported by
-    // Boris/ENBSeries). LandLOD is LODRoot child 0 and WaterLOD child 2, so
-    // from LandLOD the tiles register before every BTR water shape and
-    // render at the tail of the shared technique list: same draw block,
-    // same buffers, right behind the game's own LOD water.
     auto* attachRoot = root;
     if (ConfigLoader::getWaterDrawLast() && (tes->lodLandRoot != nullptr)) {
         attachRoot = tes->lodLandRoot;
@@ -375,8 +332,6 @@ void WaterSkirt::updateSkirt()
     s_centerBx = centerBx;
     s_centerBy = centerBy;
 
-    // A rebuild that lands while the map is still up must stay hidden until it
-    // closes (setMapMenuOpen will reveal it then).
     if (s_mapMenuOpen) {
         s_skirtRoot->SetAppCulled(true);
     }
