@@ -1,10 +1,9 @@
 #include "ConfigLoader.hpp"
-#include "FarClip.hpp"
+#include "SkirtCull.hpp"
+#include "SkirtDepth.hpp"
 #include "WaterSkirt.hpp"
 
 #include <spdlog/sinks/basic_file_sink.h>
-
-#include <Windows.h>
 
 #include <filesystem>
 
@@ -27,7 +26,11 @@ void setupLog()
     spdlog::flush_on(spdlog::level::trace);
 }
 
-void installHooks() { FarClip::GetFarDistanceHook::install(); }
+void installHooks()
+{
+    SkirtCull::AtmosphereUpdateHook::install();
+    SkirtDepth::install();
+}
 
 // This DLL is compiled for exactly one runtime family (CommonLibSSE selects
 // address library IDs and struct layouts at compile time from
@@ -37,17 +40,17 @@ void installHooks() { FarClip::GetFarDistanceHook::install(); }
 auto runtimeMatchesBuild() -> bool
 {
 #ifdef SKYRIM_SUPPORT_AE
-    constexpr bool builtForAE = true;
+    constexpr bool BUILT_FOR_AE = true;
 #else
-    constexpr bool builtForAE = false;
+    constexpr bool BUILT_FOR_AE = false;
 #endif
     const auto version = REL::Module::get().version();
     const bool runtimeIsAE = version.minor() >= 6;
-    if (runtimeIsAE != builtForAE) {
+    if (runtimeIsAE != BUILT_FOR_AE) {
         spdlog::warn("{} is built for {} but the running game is {}.{}.{}; "
                      "install the matching DLL instead",
                      PLUGIN_NAME,
-                     builtForAE ? "AE (1.6.x)" : "SE (1.5.x)",
+                     BUILT_FOR_AE ? "AE (1.6.x)" : "SE (1.5.x)",
                      version.major(),
                      version.minor(),
                      version.patch());

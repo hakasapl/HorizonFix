@@ -55,6 +55,12 @@ void WaterSkirt::removeSkirt()
             }
         }
     }
+    if (s_skirtRoot) {
+        if (auto* const parent = s_skirtRoot->parent) {
+            parent->DetachChild(s_skirtRoot.get());
+        }
+        s_skirtRoot.reset();
+    }
     s_tiles.clear();
     s_layout.clear();
     s_skirtWorldSpace = nullptr;
@@ -73,15 +79,63 @@ auto WaterSkirt::cloneTemplate(RE::BSTriShape* templatePtr) -> RE::NiPointer<RE:
     return RE::NiPointer<RE::BSGeometry> {cloneBase ? cloneBase->AsGeometry() : nullptr};
 }
 
+void WaterSkirt::updateVisibility()
+{
+    if (s_tiles.empty()) {
+        return;
+    }
+
+    auto* const camera = RE::Main::WorldRootCamera();
+    if (camera == nullptr) {
+        return;
+    }
+    const auto camPos = camera->world.translate;
+    const float farClip = camera->viewFrustum.fFar;
+    if (farClip <= 0.0F) {
+        return;
+    }
+    const float proxyDist = 0.5F * farClip;
+
+    const float centerX = (static_cast<float>(s_centerBx) + 0.5F) * K_TILE_SIZE;
+    const float centerY = (static_cast<float>(s_centerBy) + 0.5F) * K_TILE_SIZE;
+
+    const std::size_t count = std::min(s_tiles.size(), s_layout.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& tile = s_tiles[i];
+        if (!tile) {
+            continue;
+        }
+        const auto& rel = s_layout[i];
+
+        // True tile bound; the radius (half-diagonal is size * 0.71) carries
+        // ~40% slack for the camera moving until the next update.
+        RE::NiBound bound {};
+        bound.center = RE::NiPoint3 {centerX + rel.dx, centerY + rel.dy, s_skirtHeight};
+        bound.radius = rel.size;
+
+        const auto toTile = bound.center - camPos;
+        const float dist = toTile.Length();
+        if (dist > proxyDist) {
+            const float shrink = proxyDist / dist;
+            bound.center = camPos + (toTile * shrink);
+            bound.radius *= shrink;
+        }
+
+        const bool visible = RE::NiCamera::BoundInFrustum(bound, camera);
+        if (tile->flags.any(RE::NiAVObject::Flag::kHidden) == visible) {
+            tile->SetAppCulled(!visible);
+        }
+    }
+}
+
 auto WaterSkirt::effectiveRadius() -> float
 {
-    // clamp to 90% of far plane
-    float radius = ConfigLoader::getSkirtRadius();
-    if (ConfigLoader::getFarPlaneDistance() > 0) {
-        radius = std::min(radius, ConfigLoader::getFarPlaneDistance() * FARPLANE_CLAMP_FACTOR);
-    }
+    // The true horizon distance. The tiles keep their real world positions so
+    // all distance-based shading (fog, wave fade, ENB water effects) sees the
+    // same values as the neighboring vanilla LOD water; the far clip plane is
+    // handled at draw time instead (see SkirtDepth).
     constexpr float CLAMP = 4.0F;
-    return std::max(radius, CLAMP * K_TILE_SIZE);
+    return std::max(ConfigLoader::getSkirtRadius(), CLAMP * K_TILE_SIZE);
 }
 
 void WaterSkirt::buildLayout()
@@ -245,6 +299,35 @@ void WaterSkirt::updateSkirt()
 
     buildLayout();
 
+    // All tiles live under a dedicated root node, in true world coordinates.
+    const auto childHint = static_cast<std::uint16_t>(std::min<std::size_t>(s_layout.size(), 0xFFFF));
+    s_skirtRoot = RE::NiPointer<RE::NiNode> {RE::NiNode::Create(childHint)};
+    if (!s_skirtRoot) {
+        return;
+    }
+    s_skirtRoot->name = K_ROOT_NAME;
+
+    // Attach under the LandLOD node, not the WaterLOD node, so the skirt
+    // draws right AFTER the game's own LOD water instead of before it.
+    // Mechanics (verified in SkyrimSE 1.5.97): all water renders in one
+    // sweep of per-technique pass lists, and the tiles - clones of the
+    // game's LOD water shapes - share the vanilla LOD water technique, so
+    // they land in the same list as the game's tiles. Those lists are
+    // head-inserted (LIFO): whatever registers LAST draws FIRST, and
+    // registration follows scene-graph traversal order. Under the WaterLOD
+    // node the skirt could register after the BTR containers and become the
+    // frame's first water draws - before any normal water has filled the
+    // shader constants ENB's enhanced LOD water reads (reported by
+    // Boris/ENBSeries). LandLOD is LODRoot child 0 and WaterLOD child 2, so
+    // from LandLOD the tiles register before every BTR water shape and
+    // render at the tail of the shared technique list: same draw block,
+    // same buffers, right behind the game's own LOD water.
+    auto* attachRoot = root;
+    if (ConfigLoader::getWaterDrawLast() && (tes->lodLandRoot != nullptr)) {
+        attachRoot = tes->lodLandRoot;
+    }
+    attachRoot->AttachChild(s_skirtRoot.get(), true);
+
     RE::NiUpdateData updateData {};
     s_tiles.reserve(s_layout.size());
     for (std::size_t i = 0; i < s_layout.size(); ++i) {
@@ -254,7 +337,13 @@ void WaterSkirt::updateSkirt()
         }
         tile->name = K_TILE_NAME;
         tile->SetAppCulled(false);
-        root->AttachChild(tile.get(), true);
+        // Much of the skirt lies past the far clip plane on purpose; the
+        // always-passing bound (and kAlwaysDraw, where honored) keeps the
+        // engine's frustum culling from rejecting those tiles. GPU clipping
+        // is disabled per draw by the SkirtDepth hook.
+        tile->flags.set(RE::NiAVObject::Flag::kAlwaysDraw);
+        tile->modelBound.radius = K_CULL_PROOF_RADIUS;
+        s_skirtRoot->AttachChild(tile.get(), true);
         tile->Update(updateData);
         s_tiles.emplace_back(std::move(tile));
     }

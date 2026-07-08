@@ -34,15 +34,17 @@ add_subdirectory("extern/CommonLibSSE" commonlibsse)
 
 set(headers
     "include/ConfigLoader.hpp"
-    "include/FarClip.hpp"
     "include/PCH.h"
+    "include/SkirtCull.hpp"
+    "include/SkirtDepth.hpp"
     "include/WaterSkirt.hpp"
 )
 
 set(sources
     "src/ConfigLoader.cpp"
-    "src/FarClip.cpp"
     "src/main.cpp"
+    "src/SkirtCull.cpp"
+    "src/SkirtDepth.cpp"
     "src/WaterSkirt.cpp"
 )
 

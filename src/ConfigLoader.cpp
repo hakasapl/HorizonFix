@@ -13,27 +13,27 @@ void ConfigLoader::loadConfig()
     const auto iniPath = std::filesystem::current_path() / "Data" / "SKSE" / "Plugins" / "HorizonFix.ini";
     const auto path = iniPath.wstring();
 
-    const auto farDistance = readIniFloat(path.c_str(), L"fFarDistance", DEFAULT_FAR_DISTANCE);
-    s_config.farPlaneDistance = farDistance;
-    if (s_config.farPlaneDistance > FAR_DISTANCE_WARN_THRESHOLD) {
-        spdlog::warn("fFarDistance {} exceeds the recommended maximum of "
-                     "2000000, artifacts are expected",
-                     s_config.farPlaneDistance);
-    }
-
     s_config.skirtRadius = readIniFloat(path.c_str(), L"fWaterSkirtRadius", DEFAULT_RADIUS);
     s_config.skirtZOffset = readIniFloat(path.c_str(), L"fWaterSkirtZOffset", DEFAULT_Z_OFFSET);
+    s_config.waterDrawLast = readIniFloat(path.c_str(), L"bWaterSkirtDrawLast", DEFAULT_WATER_DRAW_LAST) != 0.0F;
 
-    spdlog::info("Config Loaded: Far clip distance: {}", s_config.farPlaneDistance);
+    // Pre-0.2 configs set the global far clip plane through this key; the
+    // skirt now fits itself inside the vanilla far clip instead, so the value
+    // is ignored (this also keeps ENB's captured far clip untouched).
+    if (readIniFloat(path.c_str(), L"fFarDistance", 0.0F) != 0.0F) {
+        spdlog::info("fFarDistance is deprecated and ignored: the far clip plane is no longer modified");
+    }
+
     spdlog::info("Config Loaded: Water Skirt Radius: {}", s_config.skirtRadius);
     spdlog::info("Config Loaded: Water Skirt Z Offset: {}", s_config.skirtZOffset);
+    spdlog::info("Config Loaded: Water Skirt Draw Last: {}", s_config.waterDrawLast);
 }
 
 auto ConfigLoader::getSkirtRadius() -> float { return s_config.skirtRadius; }
 
 auto ConfigLoader::getSkirtZOffset() -> float { return s_config.skirtZOffset; }
 
-auto ConfigLoader::getFarPlaneDistance() -> float { return s_config.farPlaneDistance; }
+auto ConfigLoader::getWaterDrawLast() -> bool { return s_config.waterDrawLast; }
 
 auto ConfigLoader::readIniFloat(const wchar_t* path,
                                 const wchar_t* key,
