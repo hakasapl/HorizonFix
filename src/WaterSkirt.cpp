@@ -316,10 +316,6 @@ void WaterSkirt::updateSkirt()
         }
         tile->name = K_TILE_NAME;
         tile->SetAppCulled(false);
-        // Much of the skirt lies past the far clip plane on purpose; the
-        // always-passing bound (and kAlwaysDraw, where honored) keeps the
-        // engine's frustum culling from rejecting those tiles. GPU clipping
-        // is disabled per draw by the SkirtDepth hook.
         tile->flags.set(RE::NiAVObject::Flag::kAlwaysDraw);
         tile->modelBound.radius = K_CULL_PROOF_RADIUS;
         s_skirtRoot->AttachChild(tile.get(), true);
