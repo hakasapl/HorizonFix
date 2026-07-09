@@ -288,8 +288,9 @@ void WaterSkirt::updateSkirt()
         return;
     }
 
-    const float oceanHeight = templateQuad->worldBound.center.z;
-    s_skirtHeight = oceanHeight + ConfigLoader::getSkirtZOffset();
+    auto* const lodWorldSpace = getLODWorldSpace(worldSpace);
+    const float oceanHeight = templateQuad->world.translate.z;
+    s_skirtHeight = lodWorldSpace->lodWaterHeight + ConfigLoader::getSkirtZOffset();
 
     buildLayout();
 
@@ -332,7 +333,6 @@ void WaterSkirt::updateSkirt()
         s_skirtRoot->SetAppCulled(true);
     }
 
-    auto* const lodWorldSpace = getLODWorldSpace(worldSpace);
     spdlog::info("Water skirt built for {}: {} tiles, radius {}, ocean height "
                  "{} (NAM4 {}), skirt height {}, template {} verts",
                  worldSpace->GetFormEditorID(),
