@@ -18,7 +18,7 @@ if(SKYRIM_SUPPORT_AE)
 else()
     set(PLUGIN_NAME "HorizonFixSE")
 endif()
-set(PLUGIN_VERSION "0.2.0")
+set(PLUGIN_VERSION "0.2.1")
 project(${PLUGIN_NAME} VERSION ${PLUGIN_VERSION} LANGUAGES CXX)
 
 if(MSVC)
