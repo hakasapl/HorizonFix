@@ -31,14 +31,17 @@ void SkirtDepth::SetupGeometryHook::thunk(RE::BSShader* shaderPtr,
     // depth those fragments clamp to.
     REX::W32::ID3D11RasterizerState* current = nullptr;
     context->RSGetState(&current);
-    if (auto* const noClip = getNoClipState(current)) {
+    auto* const noClip = getNoClipState(current);
+    if (noClip != nullptr) {
         context->RSSetState(noClip);
     }
     s_savedRasterState = current;
+    s_boundNoClip = noClip;
 
     auto adjusted = s_savedViewports[0];
     adjusted.maxDepth = K_BACKDROP_DEPTH;
     context->RSSetViewports(1, &adjusted);
+    s_adjustedViewport = adjusted;
     s_savedCount = count;
     s_active = true;
 }
@@ -49,13 +52,27 @@ void SkirtDepth::RestoreGeometryHook::thunk(RE::BSShader* shaderPtr,
 {
     if (s_active) {
         if (auto* const context = getContext()) {
-            context->RSSetViewports(s_savedCount, s_savedViewports.data());
-            context->RSSetState(s_savedRasterState);
+            std::uint32_t count = 1;
+            REX::W32::D3D11_VIEWPORT current {};
+            context->RSGetViewports(&count, &current);
+            if (count > 0 && current == s_adjustedViewport) {
+                context->RSSetViewports(s_savedCount, s_savedViewports.data());
+            }
+
+            REX::W32::ID3D11RasterizerState* boundNow = nullptr;
+            context->RSGetState(&boundNow);
+            if (s_boundNoClip != nullptr && boundNow == s_boundNoClip) {
+                context->RSSetState(s_savedRasterState);
+            }
+            if (boundNow != nullptr) {
+                boundNow->Release();
+            }
         }
         if (s_savedRasterState != nullptr) {
             s_savedRasterState->Release();
             s_savedRasterState = nullptr;
         }
+        s_boundNoClip = nullptr;
         s_active = false;
     }
 

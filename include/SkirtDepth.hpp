@@ -16,7 +16,9 @@ private:
     // State between a Setup/Restore pair; water passes render on a single thread.
     static inline std::array<REX::W32::D3D11_VIEWPORT, K_MAX_VIEWPORTS> s_savedViewports {};
     static inline std::uint32_t s_savedCount = 0;
+    static inline REX::W32::D3D11_VIEWPORT s_adjustedViewport {}; // what Setup bound
     static inline REX::W32::ID3D11RasterizerState* s_savedRasterState = nullptr; // ref held via RSGetState
+    static inline REX::W32::ID3D11RasterizerState* s_boundNoClip = nullptr; // what Setup bound, no ref held
     static inline bool s_active = false;
 
     struct NoClipEntry {

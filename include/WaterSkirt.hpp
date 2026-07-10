@@ -8,6 +8,15 @@ public:
     static constexpr const char* K_ROOT_NAME = "HSF_WaterSkirtRoot"; // Name of the tile parent node
 
 private:
+    // One inward-facing frustum plane: a point p is inside when
+    // normal.Dot(p) - d > -radius.
+    struct FrustumPlane {
+        RE::NiPoint3 normal;
+        float d {};
+    };
+
+    using FrustumPlanes = std::array<FrustumPlane, 6>;
+
     static constexpr float K_TILE_SIZE = 131072.0F; // LOD32 size
     static constexpr float K_CULL_PROOF_RADIUS = 1.0e9F;
 
@@ -51,6 +60,15 @@ public:
     static void setMapMenuOpen(bool open);
 
 private:
+    static auto rotationColumn(const RE::NiMatrix3& rot,
+                               int col) -> RE::NiPoint3;
+
+    static void buildFrustumPlanes(const RE::NiCamera* camera,
+                                   FrustumPlanes& planes);
+
+    static auto boundInFrustum(const RE::NiBound& bound,
+                               const FrustumPlanes& planes) -> bool;
+
     static auto getLODWorldSpace(RE::TESWorldSpace* worldSpacePtr) -> RE::TESWorldSpace*;
 
     static void searchTemplateQuad(RE::NiAVObject* objPtr,

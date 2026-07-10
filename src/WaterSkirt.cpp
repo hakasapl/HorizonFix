@@ -2,6 +2,7 @@
 
 #include "ConfigLoader.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <limits>
@@ -9,6 +10,55 @@
 #include <vector>
 
 using namespace HorizonFix;
+
+auto WaterSkirt::rotationColumn(const RE::NiMatrix3& rot,
+                                int col) -> RE::NiPoint3
+{
+    return RE::NiPoint3 {rot.entry[0][col], rot.entry[1][col], rot.entry[2][col]};
+}
+
+void WaterSkirt::buildFrustumPlanes(const RE::NiCamera* camera,
+                                    FrustumPlanes& planes)
+{
+    const auto& world = camera->world;
+    const auto& frustum = camera->viewFrustum;
+    const RE::NiPoint3 dir = rotationColumn(world.rotate, 0);
+    const RE::NiPoint3 up = rotationColumn(world.rotate, 1);
+    const RE::NiPoint3 right = rotationColumn(world.rotate, 2);
+    const RE::NiPoint3& pos = world.translate;
+
+    const auto planeThrough = [](const RE::NiPoint3& normal, const RE::NiPoint3& point) -> FrustumPlane {
+        return FrustumPlane {.normal = normal, .d = normal.Dot(point)};
+    };
+
+    planes[0] = planeThrough(dir, pos + (dir * frustum.fNear));
+    planes[1] = planeThrough(-dir, pos + (dir * frustum.fFar));
+
+    if (frustum.bOrtho) {
+        planes[2] = planeThrough(right, pos + (right * frustum.fLeft));
+        planes[3] = planeThrough(-right, pos + (right * frustum.fRight));
+        planes[4] = planeThrough(-up, pos + (up * frustum.fTop));
+        planes[5] = planeThrough(up, pos + (up * frustum.fBottom));
+        return;
+    }
+
+    const auto slopePlane = [&](const RE::NiPoint3& axis, float slope, float sign) -> FrustumPlane {
+        const float k = 1.0F / std::sqrt((slope * slope) + 1.0F);
+        const RE::NiPoint3 normal = ((axis * sign) - (dir * (sign * slope))) * k;
+        return FrustumPlane {.normal = normal, .d = normal.Dot(pos)};
+    };
+    planes[2] = slopePlane(right, frustum.fLeft, 1.0F);
+    planes[3] = slopePlane(right, frustum.fRight, -1.0F);
+    planes[4] = slopePlane(up, frustum.fTop, -1.0F);
+    planes[5] = slopePlane(up, frustum.fBottom, 1.0F);
+}
+
+auto WaterSkirt::boundInFrustum(const RE::NiBound& bound,
+                                const FrustumPlanes& planes) -> bool
+{
+    return std::ranges::all_of(
+        planes, [&](const auto& plane) -> auto { return plane.normal.Dot(bound.center) - plane.d > -bound.radius; });
+}
 
 auto WaterSkirt::getLODWorldSpace(RE::TESWorldSpace* worldSpacePtr) -> RE::TESWorldSpace*
 {
@@ -99,6 +149,9 @@ void WaterSkirt::updateVisibility()
     }
     const float proxyDist = 0.5F * farClip;
 
+    FrustumPlanes planes {};
+    buildFrustumPlanes(camera, planes);
+
     const float centerX = (static_cast<float>(s_centerBx) + 0.5F) * K_TILE_SIZE;
     const float centerY = (static_cast<float>(s_centerBy) + 0.5F) * K_TILE_SIZE;
 
@@ -124,7 +177,7 @@ void WaterSkirt::updateVisibility()
             bound.radius *= shrink;
         }
 
-        const bool visible = RE::NiCamera::BoundInFrustum(bound, camera);
+        const bool visible = boundInFrustum(bound, planes);
         if (tile->flags.any(RE::NiAVObject::Flag::kHidden) == visible) {
             tile->SetAppCulled(!visible);
         }
@@ -236,8 +289,11 @@ void WaterSkirt::updateSkirt()
         return;
     }
 
+    // TES::worldSpace can keep pointing at the last exterior worldspace while
+    // an interior cell is loaded, so check interiorCell too; otherwise the
+    // skirt survives interior transitions and keeps rendering there.
     auto* const worldSpace = tes->worldSpace;
-    if (worldSpace == nullptr) {
+    if (worldSpace == nullptr || tes->interiorCell != nullptr) {
         removeSkirt();
         return;
     }
