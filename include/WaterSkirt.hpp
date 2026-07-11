@@ -69,6 +69,8 @@ private:
     static auto boundInFrustum(const RE::NiBound& bound,
                                const FrustumPlanes& planes) -> bool;
 
+    static auto getWorldSpace(RE::TES* tesPtr) -> RE::TESWorldSpace*;
+
     static auto getLODWorldSpace(RE::TESWorldSpace* worldSpacePtr) -> RE::TESWorldSpace*;
 
     static void searchTemplateQuad(RE::NiAVObject* objPtr,

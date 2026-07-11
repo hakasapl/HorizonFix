@@ -60,6 +60,18 @@ auto WaterSkirt::boundInFrustum(const RE::NiBound& bound,
         planes, [&](const auto& plane) -> auto { return plane.normal.Dot(bound.center) - plane.d > -bound.radius; });
 }
 
+auto WaterSkirt::getWorldSpace(RE::TES* tesPtr) -> RE::TESWorldSpace*
+{
+    // Game patch 1.6.1130 inserted 8 bytes into TES ahead of worldSpace, and
+    // CommonLib's compiled AE layout only matches 1.6.1130+; every older
+    // runtime (SE and pre-1130 AE like 1.6.640) keeps the field at 0x140.
+    // Reading the struct member there would dereference deadCount instead.
+    if (REL::Module::get().version() < SKSE::RUNTIME_SSE_1_6_1130) {
+        return *reinterpret_cast<RE::TESWorldSpace**>(reinterpret_cast<std::uintptr_t>(tesPtr) + 0x140);
+    }
+    return tesPtr->worldSpace;
+}
+
 auto WaterSkirt::getLODWorldSpace(RE::TESWorldSpace* worldSpacePtr) -> RE::TESWorldSpace*
 {
     while ((worldSpacePtr->parentWorld != nullptr)
@@ -292,7 +304,7 @@ void WaterSkirt::updateSkirt()
     // TES::worldSpace can keep pointing at the last exterior worldspace while
     // an interior cell is loaded, so check interiorCell too; otherwise the
     // skirt survives interior transitions and keeps rendering there.
-    auto* const worldSpace = tes->worldSpace;
+    auto* const worldSpace = getWorldSpace(tes);
     if (worldSpace == nullptr || tes->interiorCell != nullptr) {
         removeSkirt();
         return;
