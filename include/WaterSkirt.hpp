@@ -2,102 +2,247 @@
 
 namespace HorizonFix {
 
+/**
+ * @brief Builds and maintains the water skirt: a ring of oversized LOD water clones around the loaded area
+ *
+ * The skirt fills the horizon gap between the far clip plane and the sky with water. It works by
+ * cloning the worldspace's own LOD water mesh (so material, flow, and reflections match) and tiling
+ * the clones in a disc around the player, beyond the area the game's real LOD water covers. Tiles
+ * are made cull-proof (huge model bound + kAlwaysDraw) so the engine never rejects them against the
+ * far plane; SkirtDepth then forces their fragments to a depth just inside 1.0 so they only win in
+ * pixels nothing else drew. Because engine culling is defeated, this class performs its own frustum
+ * culling every frame (updateVisibility, driven by the SkirtCull hook).
+ */
 class WaterSkirt {
 public:
-    static constexpr const char* K_TILE_NAME = "HSF_WaterSkirt"; // Name of tiles
-    static constexpr const char* K_ROOT_NAME = "HSF_WaterSkirtRoot"; // Name of the tile parent node
+    static constexpr const char* K_TILE_NAME = "HSF_WaterSkirt"; /**< Name of tiles; SkirtDepth identifies skirt render passes by this name */
+    static constexpr const char* K_ROOT_NAME = "HSF_WaterSkirtRoot"; /**< Name of the tile parent node */
 
 private:
-    // One inward-facing frustum plane: a point p is inside when
-    // normal.Dot(p) - d > -radius.
+    /**
+     * @brief One inward-facing frustum plane: a point p is inside when normal.Dot(p) - d > -radius
+     */
     struct FrustumPlane {
-        RE::NiPoint3 normal;
-        float d {};
+        RE::NiPoint3 normal; /**< Unit normal pointing into the frustum */
+        float d {}; /**< Plane offset: normal.Dot(anyPointOnPlane) */
     };
 
+    /** @brief The six planes of a view frustum: near, far, left, right, top, bottom */
     using FrustumPlanes = std::array<FrustumPlane, 6>;
 
-    static constexpr float K_TILE_SIZE = 131072.0F; // LOD32 size
-    static constexpr float K_CULL_PROOF_RADIUS = 1.0e9F;
+    static constexpr float K_TILE_SIZE = 131072.0F; /**< Base tile edge length: one LOD32 block (32 cells x 4096 units) */
+    static constexpr float K_CULL_PROOF_RADIUS = 1.0e9F; /**< modelBound radius large enough that the engine's frustum test always passes */
 
+    /**
+     * @brief One tile of the skirt layout, relative to the center block's midpoint
+     */
     struct RelTile {
-        float dx;
-        float dy;
-        float size;
+        float dx; /**< X offset of the tile center from the layout center */
+        float dy; /**< Y offset of the tile center from the layout center */
+        float size; /**< Edge length of the tile */
     };
 
-    static inline std::vector<RE::NiPointer<RE::BSGeometry>> s_tiles;
-    static inline std::vector<RelTile> s_layout;
-    static inline RE::NiPointer<RE::NiNode> s_skirtRoot;
-    static inline RE::TESWorldSpace* s_skirtWorldSpace;
-    static inline int s_centerBx;
-    static inline int s_centerBy;
-    static inline RE::NiPoint3 s_modelCenter;
-    static inline float s_modelSide;
-    static inline float s_skirtHeight;
-    static inline std::atomic_bool s_taskPending;
-    static inline bool s_mapMenuOpen = false;
+    static inline std::vector<RE::NiPointer<RE::BSGeometry>> s_tiles; /**< Live tile geometries, index-matched to s_layout */
+    static inline std::vector<RelTile> s_layout; /**< Relative tile layout, rebuilt per worldspace */
+    static inline RE::NiPointer<RE::NiNode> s_skirtRoot; /**< Parent node holding every tile, attached under the LOD roots */
+    static inline RE::TESWorldSpace* s_skirtWorldSpace; /**< Worldspace the current skirt was built for */
+    static inline int s_centerBx; /**< X index of the LOD32 block the skirt is centered on */
+    static inline int s_centerBy; /**< Y index of the LOD32 block the skirt is centered on */
+    static inline RE::NiPoint3 s_modelCenter; /**< Center of the template quad in its own model space */
+    static inline float s_modelSide; /**< Edge length of the template quad in model space */
+    static inline float s_skirtHeight; /**< World Z the tiles sit at: LOD water height plus the configured offset */
+    static inline std::atomic_bool s_taskPending; /**< Coalesces queueUpdate calls into a single queued task */
+    static inline bool s_mapMenuOpen = false; /**< True while the map menu is open and the skirt is force-hidden */
 
-    // BTR water meshes follow shorelines, so most are irregular; a 4-vertex tri
-    // shape is a clean full rectangle, and the largest one is a fully submerged
-    // ocean chunk. Prefer that as the clone template.
+    /**
+     * @brief Running best candidate while scanning the LOD water tree for a clone template
+     *
+     * BTR water meshes follow shorelines, so most are irregular; a 4-vertex tri shape is a clean
+     * full rectangle, and the largest one is a fully submerged ocean chunk. Prefer that as the
+     * clone template.
+     */
     struct TemplateSearch {
-        RE::BSTriShape* best = nullptr;
-        std::uint32_t bestVertexCount = 0;
-        float bestRadius = 0.0F;
+        RE::BSTriShape* best = nullptr; /**< Best template found so far */
+        std::uint32_t bestVertexCount = 0; /**< Vertex count of best (lower wins) */
+        float bestRadius = 0.0F; /**< World bound radius of best (tie-breaker, higher wins) */
     };
 
 public:
+    /**
+     * @brief Schedules a skirt update (updateSkirt) on the main thread via the SKSE task queue
+     *
+     * Safe to call from any thread and from event sinks; repeated calls while a task is already
+     * queued are coalesced into one.
+     */
     static void queueUpdate();
 
+    /**
+     * @brief Per-frame manual frustum culling of the skirt tiles
+     *
+     * Because the tiles are cull-proof to the engine, this replicates the frustum test the engine
+     * would have done, using each tile's true bound instead of the inflated one. Called every frame
+     * from the Atmosphere::Update hook (SkirtCull).
+     */
     static void updateVisibility();
 
-    // Hide the whole skirt while the map menu is up. The local map renders the
-    // world through its own camera, where the skirt's cull-proof tiles and the
-    // per-draw depth hook have no business (and crash the local map). Driven by
-    // a menu event rather than a per-frame check because the map pauses the
-    // game, so the Atmosphere update that ticks updateVisibility stops firing.
+    /**
+     * @brief Hide or show the whole skirt for the map menu
+     *
+     * Hide the whole skirt while the map menu is up. The local map renders the world through its
+     * own camera, where the skirt's cull-proof tiles and the per-draw depth hook have no business
+     * (and crash the local map). Driven by a menu event rather than a per-frame check because the
+     * map pauses the game, so the Atmosphere update that ticks updateVisibility stops firing.
+     *
+     * @param open True when the map menu is opening, false when it closes
+     */
     static void setMapMenuOpen(bool open);
 
 private:
+    /**
+     * @brief Extracts one column of a rotation matrix as a vector (a world-space basis axis)
+     *
+     * @param rot Rotation matrix to read from
+     * @param col Column index: 0 = forward, 1 = up, 2 = right for a camera world rotation
+     * @return RE::NiPoint3 The column as a vector
+     */
     static auto rotationColumn(const RE::NiMatrix3& rot,
                                int col) -> RE::NiPoint3;
 
+    /**
+     * @brief Computes the six inward-facing world-space planes of the camera's view frustum
+     *
+     * Handles both perspective and orthographic frusta.
+     *
+     * @param camera Camera whose world transform and viewFrustum are used
+     * @param planes Receives the planes in near, far, left, right, top, bottom order
+     */
     static void buildFrustumPlanes(const RE::NiCamera* camera,
                                    FrustumPlanes& planes);
 
+    /**
+     * @brief Sphere-vs-frustum visibility test
+     *
+     * @param bound Bounding sphere to test
+     * @param planes Frustum planes from buildFrustumPlanes
+     * @return true If the sphere is at least partially inside every plane
+     * @return false If the sphere is fully outside any plane
+     */
     static auto boundInFrustum(const RE::NiBound& bound,
                                const FrustumPlanes& planes) -> bool;
 
+    /**
+     * @brief Reads TES::worldSpace in a way that is safe on every runtime
+     *
+     * Works around the TES layout change in game patch 1.6.1130 (see the implementation for
+     * details); reading the struct member directly would misread the field on older runtimes.
+     *
+     * @param tesPtr The TES singleton
+     * @return RE::TESWorldSpace* The current exterior worldspace, or nullptr
+     */
     static auto getWorldSpace(RE::TES* tesPtr) -> RE::TESWorldSpace*;
 
+    /**
+     * @brief Resolves the worldspace that owns the LOD data (and thus the LOD water height)
+     *
+     * Small worldspaces (e.g. cities) inherit LOD from a parent; this walks up parentWorld while
+     * the kUseLODData flag is set.
+     *
+     * @param worldSpacePtr Worldspace to start from
+     * @return RE::TESWorldSpace* The worldspace whose LOD data is in use
+     */
     static auto getLODWorldSpace(RE::TESWorldSpace* worldSpacePtr) -> RE::TESWorldSpace*;
 
+    /**
+     * @brief Recursively scans the LOD water scene graph for the best tile to clone
+     *
+     * Prefers the tri shape with the fewest vertices (ties broken by largest world bound), which
+     * selects a clean fully-submerged rectangular quad; see TemplateSearch. Skips geometry this
+     * plugin created itself.
+     *
+     * @param objPtr Subtree to scan (tolerates nullptr)
+     * @param search In/out running best candidate
+     */
     static void searchTemplateQuad(RE::NiAVObject* objPtr,
                                    TemplateSearch& search);
 
+    /**
+     * @brief Detaches every tile and the skirt root from the scene and resets all cached state
+     */
     static void removeSkirt();
 
+    /**
+     * @brief Clones the template water quad through the engine's NiCloningProcess
+     *
+     * @param templatePtr Tri shape to clone
+     * @return RE::NiPointer<RE::BSGeometry> The clone, or nullptr if cloning failed
+     */
     static auto cloneTemplate(RE::BSTriShape* templatePtr) -> RE::NiPointer<RE::BSGeometry>;
 
+    /**
+     * @brief The configured skirt radius, clamped to a workable minimum of four tile lengths
+     *
+     * @return float Radius in game units used for layout
+     */
     static auto effectiveRadius() -> float;
 
+    /**
+     * @brief Adds one candidate tile to s_layout, quad-splitting tiles that straddle the rim
+     *
+     * Tiles fully inside the radius are emitted as-is, tiles fully outside are dropped, and tiles
+     * crossing the rim are split into four quadrants up to splitsLeft times so the skirt edge
+     * approximates a circle instead of a coarse staircase.
+     *
+     * @param dx Tile center X offset from the layout center
+     * @param dy Tile center Y offset from the layout center
+     * @param size Tile edge length
+     * @param splitsLeft Remaining subdivision budget (from iWaterSkirtRimQuality)
+     * @param radius Skirt radius the layout is trimmed to
+     */
     static void layoutTile(float dx,
                            float dy,
                            float size,
                            int splitsLeft,
                            float radius);
 
+    /**
+     * @brief Rebuilds s_layout: a disc of tiles out to the effective radius
+     *
+     * The central 3x3 blocks are left empty because the game's own LOD water covers them.
+     */
     static void buildLayout();
 
+    /**
+     * @brief Moves and scales the existing tiles so the layout is centered on the given LOD32 block
+     *
+     * @param centerBx X index of the block the player is in
+     * @param centerBy Y index of the block the player is in
+     */
     static void placeTiles(int centerBx,
                            int centerBy);
 
+    /**
+     * @brief Full skirt refresh; runs on the main thread via queueUpdate
+     *
+     * Removes the skirt when no exterior worldspace is active, recycles the existing tiles when
+     * only the player's block changed, and otherwise rebuilds everything: finds a template quad,
+     * builds the layout, clones and attaches the tiles.
+     */
     static void updateSkirt();
 };
 
+/**
+ * @brief Event sink that schedules a skirt update whenever a cell is attached
+ *
+ * Cell attach is the signal that the loaded area moved (player travel, worldspace change, load),
+ * i.e. that LOD water may now exist for a new worldspace or the skirt may need to follow.
+ */
 class CellAttachSink final : public RE::BSTEventSink<RE::TESCellAttachDetachEvent> {
 public:
+    /**
+     * @brief Get the singleton instance
+     *
+     * @return CellAttachSink* The single instance of this sink
+     */
     static auto getSingleton() -> CellAttachSink*
     {
         static CellAttachSink sink;
@@ -115,8 +260,16 @@ public:
     }
 };
 
+/**
+ * @brief Event sink that hides the skirt while the map menu is open (see WaterSkirt::setMapMenuOpen)
+ */
 class MapMenuSink final : public RE::BSTEventSink<RE::MenuOpenCloseEvent> {
 public:
+    /**
+     * @brief Get the singleton instance
+     *
+     * @return MapMenuSink* The single instance of this sink
+     */
     static auto getSingleton() -> MapMenuSink*
     {
         static MapMenuSink sink;
