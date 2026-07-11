@@ -83,14 +83,17 @@ auto WaterSkirt::boundInFrustum(const RE::NiBound& bound,
 
 auto WaterSkirt::getWorldSpace(RE::TES* tesPtr) -> RE::TESWorldSpace*
 {
+#ifdef SKYRIM_SUPPORT_AE
     // Game patch 1.6.1130 inserted 8 bytes into TES ahead of worldSpace, and
-    // CommonLib's compiled AE layout only matches 1.6.1130+; every older
-    // runtime (SE and pre-1130 AE like 1.6.640) keeps the field at 0x140.
-    // Reading the struct member there would dereference deadCount instead.
+    // CommonLib's compiled AE layout only matches 1.6.1130+; pre-1130 AE
+    // runtimes (1.6.318-1.6.678) keep the field at 0x140, where the compiled
+    // member read would dereference deadCount instead. The SE build's layout
+    // (and this constant's namespace) doesn't cover 1.6.x, hence the ifdef.
     if (REL::Module::get().version() < SKSE::RUNTIME_SSE_1_6_1130) {
         constexpr std::uintptr_t OFFSET_640 = 0x140;
         return *reinterpret_cast<RE::TESWorldSpace**>(reinterpret_cast<std::uintptr_t>(tesPtr) + OFFSET_640);
     }
+#endif
     return tesPtr->worldSpace;
 }
 
