@@ -167,15 +167,19 @@ void WaterSkirt::searchTemplateQuad(RE::NiAVObject* objPtr,
             // Only solid sheets of water may seed the skirt; a narrow river rectangle or a
             // shoreline mesh with holes repeats in every tile as stripes across the horizon.
             // Measured only for shapes that would win, so the work stays bounded.
-            const DonorVerdict verdict = classifyDonor(shape);
-            if (verdict == DonorVerdict::kNotSolidWater) {
+            const DonorCheck check = classifyDonor(shape);
+            // Unmeasurable meshes are trusted only with the exact topology of an
+            // engine-built water quad (see DonorVerdict)
+            const bool trustedUnverifiable = vertexCount == 4 && shape->triangleCount == 2;
+            if (check.verdict == DonorVerdict::kNotSolidWater
+                || (check.verdict == DonorVerdict::kUnverifiable && !trustedUnverifiable)) {
                 ++search.rejectedCount;
                 return;
             }
             search.best = shape;
             search.bestVertexCount = vertexCount;
             search.bestRadius = radius;
-            search.bestVerdict = verdict;
+            search.bestCheck = check;
         }
         return;
     }
@@ -227,20 +231,20 @@ auto WaterSkirt::cloneTemplate(RE::BSTriShape* templatePtr) -> RE::NiPointer<RE:
     return RE::NiPointer<RE::BSGeometry> {cloneBase ? cloneBase->AsGeometry() : nullptr};
 }
 
-auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorVerdict
+auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
 {
     // Measuring needs the CPU copies of the buffers; the engine keeps them for meshes
     // loaded from disk, but not for everything
     auto* const data = shape->rendererData;
     if ((data == nullptr) || (data->rawVertexData == nullptr) || (data->rawIndexData == nullptr)) {
-        return DonorVerdict::kUnverifiable;
+        return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "no CPU copy"};
     }
 
     // Dynamic tri shapes keep their positions in per-frame dynamic data, not in the
     // static vertex stream, so the CPU copy says nothing about the rendered shape
     if (shape->type == RE::BSGeometry::Type::kDynamicTriShape
         || shape->type == RE::BSGeometry::Type::kParticleShaderDynamicTriShape) {
-        return DonorVerdict::kUnverifiable;
+        return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "dynamic tri shape"};
     }
 
     // Vertex stride: the low nibble of the descriptor is the size in dwords (the engine's
@@ -254,7 +258,7 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorVerdict
     const std::uint32_t triangleCount = shape->triangleCount;
     constexpr std::size_t MAX_STRIDE = 64;
     if (vertexCount == 0 || triangleCount == 0 || stride < positionSize || stride > MAX_STRIDE) {
-        return DonorVerdict::kUnverifiable;
+        return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "unexpected vertex layout"};
     }
 
     // Decode every vertex position, tracking the model-space extents
@@ -289,7 +293,8 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorVerdict
         const std::uint16_t idx1 = data->rawIndexData[(3 * t) + 1];
         const std::uint16_t idx2 = data->rawIndexData[(3 * t) + 2];
         if (idx0 >= vertexCount || idx1 >= vertexCount || idx2 >= vertexCount) {
-            return DonorVerdict::kUnverifiable; // not the index data this mesh renders with
+            // not the index data this mesh renders with
+            return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "corrupt index data"};
         }
         const auto& p0 = positions[idx0];
         const auto& p1 = positions[idx1];
@@ -315,7 +320,7 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorVerdict
         && decodedHalfDiagonal >= 0.5F * modelRadius
         && decodedHalfDiagonal <= 2.0F * modelRadius;
     if (!decodeConsistent) {
-        return DonorVerdict::kUnverifiable;
+        return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "CPU copy inconsistent with bound"};
     }
 
     // Solid water: one flat, gap-free, square sheet
@@ -323,7 +328,10 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorVerdict
     constexpr float MIN_COVERAGE = 0.98F;
     const bool flat = (maxPos.z - minPos.z) <= std::max(1.0F, 0.001F * maxExtent);
     const bool solid = maxExtent > 1.0F && flat && squareness >= MIN_SQUARENESS && coverage >= MIN_COVERAGE;
-    return solid ? DonorVerdict::kSolidWater : DonorVerdict::kNotSolidWater;
+    if (solid) {
+        return DonorCheck {.verdict = DonorVerdict::kSolidWater, .detail = "measured solid"};
+    }
+    return DonorCheck {.verdict = DonorVerdict::kNotSolidWater, .detail = "measured not solid"};
 }
 
 void WaterSkirt::updateVisibility()
@@ -564,7 +572,7 @@ void WaterSkirt::updateSkirt()
         // No LOD water attached yet (or the worldspace has none to clone);
         // retried on the next cell attach event.
         if (search.rejectedCount > 0) {
-            spdlog::info("Water skirt: no usable donor yet ({} candidates rejected as not solid water); waiting for the next cell attach",
+            spdlog::info("Water skirt: no usable donor yet ({} candidates rejected: not verifiably solid water); waiting for the next cell attach",
                          search.rejectedCount);
         }
         return;
@@ -640,14 +648,15 @@ void WaterSkirt::updateSkirt()
     }
 
     spdlog::info("Water skirt built for {}: {} tiles, radius {}, (NAM4 {}), skirt height {}, template {} verts, "
-                 "donor {} ({} candidates rejected as not solid water)",
+                 "donor {} [{}] ({} candidates rejected)",
                  worldSpace->GetFormEditorID(),
                  s_tiles.size(),
                  effectiveRadius(),
                  lodWorldSpace->lodWaterHeight,
                  s_skirtHeight,
                  search.bestVertexCount,
-                 search.bestVerdict == DonorVerdict::kSolidWater ? "verified solid water" : "unverifiable (accepted)",
+                 search.bestCheck.verdict == DonorVerdict::kSolidWater ? "verified solid water" : "trusted engine quad",
+                 search.bestCheck.detail,
                  search.rejectedCount);
 }
 

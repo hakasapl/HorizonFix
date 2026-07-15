@@ -57,16 +57,25 @@ private:
     /**
      * @brief What classifyDonor concluded about a candidate donor mesh
      *
-     * Only kNotSolidWater candidates are rejected. kUnverifiable is accepted on purpose:
-     * engine-created water quads (the most common donor) do not keep their rendered positions
-     * in the CPU-side vertex copy, so they cannot be measured - but they are full square quads
-     * by construction. The verifiably bad donors are the disk-loaded shoreline meshes, and
-     * those do carry measurable CPU data.
+     * kNotSolidWater candidates are always rejected. kUnverifiable ones are trusted only when
+     * they have the exact shape signature of an engine-created water quad (4 vertices, 2
+     * triangles): those do not keep their rendered positions in the CPU-side vertex copy, so
+     * they cannot be measured, but they are full square quads by construction. An unverifiable
+     * mesh with any other topology is assumed irregular and rejected - a striped horizon was
+     * traced to exactly that case (a 6-vertex donor whose geometry could not be measured).
      */
     enum class DonorVerdict {
         kSolidWater, /**< Measured: one flat, gap-free, square sheet of water */
         kNotSolidWater, /**< Measured: narrow, gappy, or otherwise not a solid square */
-        kUnverifiable, /**< No usable CPU geometry to measure (accepted) */
+        kUnverifiable, /**< No usable CPU geometry to measure */
+    };
+
+    /**
+     * @brief classifyDonor result: the verdict plus a short reason for the log
+     */
+    struct DonorCheck {
+        DonorVerdict verdict = DonorVerdict::kUnverifiable; /**< What the measurement concluded */
+        const char* detail = "not measured"; /**< Why, in a word or two (log only) */
     };
 
     /**
@@ -81,8 +90,8 @@ private:
         RE::BSTriShape* best = nullptr; /**< Best template found so far */
         std::uint32_t bestVertexCount = 0; /**< Vertex count of best (lower wins) */
         float bestRadius = 0.0F; /**< World bound radius of best (tie-breaker, higher wins) */
-        DonorVerdict bestVerdict = DonorVerdict::kUnverifiable; /**< classifyDonor result for best */
-        std::uint32_t rejectedCount = 0; /**< Candidates rejected as verifiably not solid water */
+        DonorCheck bestCheck; /**< classifyDonor result for best */
+        std::uint32_t rejectedCount = 0; /**< Candidates rejected: measured not solid, or unmeasurable and not quad-shaped */
     };
 
 public:
@@ -209,12 +218,13 @@ private:
      * rectangle). The decode is trusted only when it agrees with the mesh's own model bound:
      * engine-created water quads keep their rendered positions elsewhere (their CPU copy
      * decodes as zeros), so they - like meshes with no CPU copy at all - come back
-     * kUnverifiable rather than kNotSolidWater.
+     * kUnverifiable rather than kNotSolidWater. See DonorVerdict for how unverifiable
+     * candidates are treated by the search.
      *
      * @param shape Candidate donor from the LOD water tree
-     * @return DonorVerdict kSolidWater, kNotSolidWater, or kUnverifiable (see DonorVerdict)
+     * @return DonorCheck The verdict plus a short reason string for logging
      */
-    static auto classifyDonor(const RE::BSTriShape* shape) -> DonorVerdict;
+    static auto classifyDonor(const RE::BSTriShape* shape) -> DonorCheck;
 
     /**
      * @brief The configured skirt radius, clamped to a workable minimum of four tile lengths
