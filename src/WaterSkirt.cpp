@@ -3,13 +3,52 @@
 #include "ConfigLoader.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <numbers>
 #include <vector>
 
 using namespace HorizonFix;
+
+namespace {
+
+/**
+ * @brief Decodes an IEEE 754 half-precision value (how vertex layouts without the full-precision
+ * flag store positions)
+ *
+ * @param half The 16-bit pattern to decode
+ * @return float The decoded value
+ */
+auto halfToFloat(std::uint16_t half) -> float
+{
+    const std::uint32_t sign = static_cast<std::uint32_t>(half & 0x8000U) << 16U;
+    std::int32_t exponent = (half >> 10U) & 0x1F;
+    std::uint32_t mantissa = half & 0x3FFU;
+
+    if (exponent == 0x1F) { // infinity / NaN
+        return std::bit_cast<float>(sign | 0x7F800000U | (mantissa << 13U));
+    }
+    if (exponent == 0) {
+        if (mantissa == 0) { // signed zero
+            return std::bit_cast<float>(sign);
+        }
+        // Subnormal: shift the implicit leading 1 into place, adjusting the exponent
+        while ((mantissa & 0x400U) == 0) {
+            mantissa <<= 1U;
+            --exponent;
+        }
+        ++exponent;
+        mantissa &= 0x3FFU;
+    }
+    // Rebias the exponent from half (15) to float (127)
+    return std::bit_cast<float>(sign | (static_cast<std::uint32_t>(exponent + 112) << 23U) | (mantissa << 13U));
+}
+
+} // namespace
 
 auto WaterSkirt::rotationColumn(const RE::NiMatrix3& rot,
                                 int col) -> RE::NiPoint3
@@ -125,9 +164,22 @@ void WaterSkirt::searchTemplateQuad(RE::NiAVObject* objPtr,
         const bool better = (search.best == nullptr) || vertexCount < search.bestVertexCount
             || (vertexCount == search.bestVertexCount && radius > search.bestRadius);
         if (better && vertexCount > 0 && radius > 0.0F) {
+            // Only solid sheets of water may seed the skirt; a narrow river rectangle or a
+            // shoreline mesh with holes repeats in every tile as stripes across the horizon.
+            // Measured only for shapes that would win, so the work stays bounded.
+            const DonorCheck check = classifyDonor(shape);
+            // Unmeasurable meshes are trusted only with the exact topology of an
+            // engine-built water quad (see DonorVerdict)
+            const bool trustedUnverifiable = vertexCount == 4 && shape->triangleCount == 2;
+            if (check.verdict == DonorVerdict::kNotSolidWater
+                || (check.verdict == DonorVerdict::kUnverifiable && !trustedUnverifiable)) {
+                ++search.rejectedCount;
+                return;
+            }
             search.best = shape;
             search.bestVertexCount = vertexCount;
             search.bestRadius = radius;
+            search.bestCheck = check;
         }
         return;
     }
@@ -177,6 +229,109 @@ auto WaterSkirt::cloneTemplate(RE::BSTriShape* templatePtr) -> RE::NiPointer<RE:
     const RE::NiPointer<RE::NiObject> cloneBase {templatePtr->CreateClone(cloning)};
     templatePtr->ProcessClone(cloning);
     return RE::NiPointer<RE::BSGeometry> {cloneBase ? cloneBase->AsGeometry() : nullptr};
+}
+
+auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
+{
+    // Measuring needs the CPU copies of the buffers; the engine keeps them for meshes
+    // loaded from disk, but not for everything
+    auto* const data = shape->rendererData;
+    if ((data == nullptr) || (data->rawVertexData == nullptr) || (data->rawIndexData == nullptr)) {
+        return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "no CPU copy"};
+    }
+
+    // Dynamic tri shapes keep their positions in per-frame dynamic data, not in the
+    // static vertex stream, so the CPU copy says nothing about the rendered shape
+    if (shape->type == RE::BSGeometry::Type::kDynamicTriShape
+        || shape->type == RE::BSGeometry::Type::kParticleShaderDynamicTriShape) {
+        return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "dynamic tri shape"};
+    }
+
+    // Vertex stride: the low nibble of the descriptor is the size in dwords (the engine's
+    // convention). Positions sit at offset 0, as three halfs or, with the full-precision
+    // flag, three floats.
+    const auto descBits = std::bit_cast<std::uint64_t>(data->vertexDesc);
+    const std::size_t stride = (descBits & 0xFU) * 4;
+    const bool fullPrecision = data->vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC);
+    const std::size_t positionSize = fullPrecision ? 3 * sizeof(float) : 3 * sizeof(std::uint16_t);
+    const std::uint32_t vertexCount = shape->vertexCount;
+    const std::uint32_t triangleCount = shape->triangleCount;
+    constexpr std::size_t MAX_STRIDE = 64;
+    if (vertexCount == 0 || triangleCount == 0 || stride < positionSize || stride > MAX_STRIDE) {
+        return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "unexpected vertex layout"};
+    }
+
+    // Decode every vertex position, tracking the model-space extents
+    std::vector<RE::NiPoint3> positions;
+    positions.reserve(vertexCount);
+    RE::NiPoint3 minPos {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+    RE::NiPoint3 maxPos {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+    for (std::uint32_t i = 0; i < vertexCount; ++i) {
+        const std::uint8_t* const vertex = data->rawVertexData + (static_cast<std::size_t>(i) * stride);
+        RE::NiPoint3 pos;
+        if (fullPrecision) {
+            std::memcpy(&pos.x, vertex, 3 * sizeof(float));
+        } else {
+            std::array<std::uint16_t, 3> halves {};
+            std::memcpy(halves.data(), vertex, sizeof(halves));
+            pos = RE::NiPoint3 {halfToFloat(halves[0]), halfToFloat(halves[1]), halfToFloat(halves[2])};
+        }
+        minPos.x = std::min(minPos.x, pos.x);
+        minPos.y = std::min(minPos.y, pos.y);
+        minPos.z = std::min(minPos.z, pos.z);
+        maxPos.x = std::max(maxPos.x, pos.x);
+        maxPos.y = std::max(maxPos.y, pos.y);
+        maxPos.z = std::max(maxPos.z, pos.z);
+        positions.push_back(pos);
+    }
+
+    // Sum the triangle areas projected on XY. For a gap-free sheet the total matches the
+    // extents rectangle; holes and slivers fall short of it.
+    double area2 = 0.0; // twice the summed area
+    for (std::uint32_t t = 0; t < triangleCount; ++t) {
+        const std::uint16_t idx0 = data->rawIndexData[(3 * t) + 0];
+        const std::uint16_t idx1 = data->rawIndexData[(3 * t) + 1];
+        const std::uint16_t idx2 = data->rawIndexData[(3 * t) + 2];
+        if (idx0 >= vertexCount || idx1 >= vertexCount || idx2 >= vertexCount) {
+            // not the index data this mesh renders with
+            return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "corrupt index data"};
+        }
+        const auto& p0 = positions[idx0];
+        const auto& p1 = positions[idx1];
+        const auto& p2 = positions[idx2];
+        area2 += std::abs((static_cast<double>(p1.x - p0.x) * static_cast<double>(p2.y - p0.y))
+                          - (static_cast<double>(p1.y - p0.y) * static_cast<double>(p2.x - p0.x)));
+    }
+
+    const float extentX = maxPos.x - minPos.x;
+    const float extentY = maxPos.y - minPos.y;
+    const float maxExtent = std::max(extentX, extentY);
+    const double extentArea = static_cast<double>(extentX) * static_cast<double>(extentY);
+    const float coverage = extentArea > 0.0 ? static_cast<float>(area2 * 0.5 / extentArea) : 0.0F;
+    const float squareness = maxExtent > 0.0F ? std::min(extentX, extentY) / maxExtent : 0.0F;
+
+    // The decode is only believable when it agrees with the mesh's own model bound.
+    // Engine-created water quads render positions that are not in the CPU copy (it decodes
+    // as zeros); condemning those would reject the most common - and perfectly square -
+    // donor, so a mismatch is unverifiable rather than bad.
+    const float decodedHalfDiagonal = 0.5F * std::hypot(extentX, extentY);
+    const float modelRadius = shape->modelBound.radius;
+    const bool decodeConsistent = modelRadius > 0.0F
+        && decodedHalfDiagonal >= 0.5F * modelRadius
+        && decodedHalfDiagonal <= 2.0F * modelRadius;
+    if (!decodeConsistent) {
+        return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "CPU copy inconsistent with bound"};
+    }
+
+    // Solid water: one flat, gap-free, square sheet
+    constexpr float MIN_SQUARENESS = 0.98F;
+    constexpr float MIN_COVERAGE = 0.98F;
+    const bool flat = (maxPos.z - minPos.z) <= std::max(1.0F, 0.001F * maxExtent);
+    const bool solid = maxExtent > 1.0F && flat && squareness >= MIN_SQUARENESS && coverage >= MIN_COVERAGE;
+    if (solid) {
+        return DonorCheck {.verdict = DonorVerdict::kSolidWater, .detail = "measured solid"};
+    }
+    return DonorCheck {.verdict = DonorVerdict::kNotSolidWater, .detail = "measured not solid"};
 }
 
 void WaterSkirt::updateVisibility()
@@ -416,6 +571,10 @@ void WaterSkirt::updateSkirt()
     if (search.best == nullptr) {
         // No LOD water attached yet (or the worldspace has none to clone);
         // retried on the next cell attach event.
+        if (search.rejectedCount > 0) {
+            spdlog::info("Water skirt: no usable donor yet ({} candidates rejected: not verifiably solid water); waiting for the next cell attach",
+                         search.rejectedCount);
+        }
         return;
     }
     auto* const templateQuad = search.best;
@@ -488,13 +647,17 @@ void WaterSkirt::updateSkirt()
         s_skirtRoot->SetAppCulled(true);
     }
 
-    spdlog::info("Water skirt built for {}: {} tiles, radius {}, (NAM4 {}), skirt height {}, template {} verts",
+    spdlog::info("Water skirt built for {}: {} tiles, radius {}, (NAM4 {}), skirt height {}, template {} verts, "
+                 "donor {} [{}] ({} candidates rejected)",
                  worldSpace->GetFormEditorID(),
                  s_tiles.size(),
                  effectiveRadius(),
                  lodWorldSpace->lodWaterHeight,
                  s_skirtHeight,
-                 search.bestVertexCount);
+                 search.bestVertexCount,
+                 search.bestCheck.verdict == DonorVerdict::kSolidWater ? "verified solid water" : "trusted engine quad",
+                 search.bestCheck.detail,
+                 search.rejectedCount);
 }
 
 void WaterSkirt::queueUpdate()

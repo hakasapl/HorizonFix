@@ -55,16 +55,43 @@ private:
     static inline bool s_mapMenuOpen = false; /**< True while the map menu is open and the skirt is force-hidden */
 
     /**
+     * @brief What classifyDonor concluded about a candidate donor mesh
+     *
+     * kNotSolidWater candidates are always rejected. kUnverifiable ones are trusted only when
+     * they have the exact shape signature of an engine-created water quad (4 vertices, 2
+     * triangles): those do not keep their rendered positions in the CPU-side vertex copy, so
+     * they cannot be measured, but they are full square quads by construction. An unverifiable
+     * mesh with any other topology is assumed irregular and rejected - a striped horizon was
+     * traced to exactly that case (a 6-vertex donor whose geometry could not be measured).
+     */
+    enum class DonorVerdict {
+        kSolidWater, /**< Measured: one flat, gap-free, square sheet of water */
+        kNotSolidWater, /**< Measured: narrow, gappy, or otherwise not a solid square */
+        kUnverifiable, /**< No usable CPU geometry to measure */
+    };
+
+    /**
+     * @brief classifyDonor result: the verdict plus a short reason for the log
+     */
+    struct DonorCheck {
+        DonorVerdict verdict = DonorVerdict::kUnverifiable; /**< What the measurement concluded */
+        const char* detail = "not measured"; /**< Why, in a word or two (log only) */
+    };
+
+    /**
      * @brief Running best candidate while scanning the LOD water tree for a clone template
      *
      * BTR water meshes follow shorelines, so most are irregular; a 4-vertex tri shape is a clean
      * full rectangle, and the largest one is a fully submerged ocean chunk. Prefer that as the
-     * clone template.
+     * clone template. Candidates that are verifiably not solid water are rejected outright
+     * (classifyDonor); cloning one would tile the horizon with evenly spaced stripes.
      */
     struct TemplateSearch {
         RE::BSTriShape* best = nullptr; /**< Best template found so far */
         std::uint32_t bestVertexCount = 0; /**< Vertex count of best (lower wins) */
         float bestRadius = 0.0F; /**< World bound radius of best (tie-breaker, higher wins) */
+        DonorCheck bestCheck; /**< classifyDonor result for best */
+        std::uint32_t rejectedCount = 0; /**< Candidates rejected: measured not solid, or unmeasurable and not quad-shaped */
     };
 
 public:
@@ -177,6 +204,27 @@ private:
      * @return RE::NiPointer<RE::BSGeometry> The clone, or nullptr if cloning failed
      */
     static auto cloneTemplate(RE::BSTriShape* templatePtr) -> RE::NiPointer<RE::BSGeometry>;
+
+    /**
+     * @brief Measures whether a candidate donor mesh is one solid square sheet of water
+     *
+     * The template search scores by vertex count and bound, which cannot tell a full square
+     * ocean quad from a narrow 4-vertex river rectangle; the scale math in updateSkirt assumes
+     * a solid square, so any other shape repeats identically in every tile as evenly spaced
+     * stripes or gaps across the horizon.
+     *
+     * Reads the CPU-side vertex/index copies and checks that the mesh is flat, square
+     * (min/max extent ratio), and gap-free (summed triangle area matches the extents
+     * rectangle). The decode is trusted only when it agrees with the mesh's own model bound:
+     * engine-created water quads keep their rendered positions elsewhere (their CPU copy
+     * decodes as zeros), so they - like meshes with no CPU copy at all - come back
+     * kUnverifiable rather than kNotSolidWater. See DonorVerdict for how unverifiable
+     * candidates are treated by the search.
+     *
+     * @param shape Candidate donor from the LOD water tree
+     * @return DonorCheck The verdict plus a short reason string for logging
+     */
+    static auto classifyDonor(const RE::BSTriShape* shape) -> DonorCheck;
 
     /**
      * @brief The configured skirt radius, clamped to a workable minimum of four tile lengths
