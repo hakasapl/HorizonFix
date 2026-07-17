@@ -476,6 +476,12 @@ void WaterSkirt::buildLayout()
     // Walk the square of candidate blocks and let layoutTile trim it to a disc
     for (int ix = -span; ix <= span; ++ix) {
         for (int iy = -span; iy <= span; ++iy) {
+            // Leave the central block empty: the game's own LOD water
+            // covers the area around the player
+            if (ix == 0 && iy == 0) {
+                continue;
+            }
+
             layoutTile(static_cast<float>(ix) * K_TILE_SIZE,
                        static_cast<float>(iy) * K_TILE_SIZE,
                        K_TILE_SIZE,

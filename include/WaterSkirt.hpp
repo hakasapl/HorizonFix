@@ -254,6 +254,8 @@ private:
 
     /**
      * @brief Rebuilds s_layout: a disc of tiles out to the effective radius
+     *
+     * The central block is left empty because the game's own LOD water covers it.
      */
     static void buildLayout();
 
