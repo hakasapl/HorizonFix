@@ -534,6 +534,20 @@ void WaterSkirt::updateSkirt()
         return;
     }
 
+    // Honor the user's per-worldspace blocklist: never build here, and tear down
+    // anything carried over from a previous worldspace. Logged once per worldspace
+    // so travel within a blocked world doesn't spam the log.
+    if (ConfigLoader::isWorldSpaceBlocked(worldSpace->GetFormEditorID())) {
+        static const RE::TESWorldSpace* lastBlockedLogged = nullptr;
+        if (lastBlockedLogged != worldSpace) {
+            lastBlockedLogged = worldSpace;
+            spdlog::info("Water skirt disabled for {}: worldspace is on sWorldSpaceBlocklist",
+                         worldSpace->GetFormEditorID());
+        }
+        removeSkirt();
+        return;
+    }
+
     // The scene-graph root the game hangs its LOD water under; the template
     // search runs below it and the skirt normally attaches to it
     auto* const root = tes->objLODWaterRoot;

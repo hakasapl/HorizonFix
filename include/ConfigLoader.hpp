@@ -26,6 +26,7 @@ private:
         float skirtRadius; /**< Radius of the water skirt around the player, in game units */
         float skirtZOffset; /**< Vertical offset applied to the skirt relative to the LOD water height */
         int rimQuality; /**< How many times rim tiles may be quad-split to approximate the circular edge */
+        std::vector<std::string> worldSpaceBlocklist; /**< Worldspace editor IDs where the skirt is disabled (sWorldSpaceBlocklist) */
     };
 
     static inline ConfigMap s_config; /**< Holds the current configuration values for the plugin */
@@ -34,6 +35,7 @@ private:
     // Hardcoded Settings
     //
     constexpr static size_t INI_BUFFER_SIZE = 64; /**< Character buffer size for reading a single INI value */
+    constexpr static size_t INI_LIST_BUFFER_SIZE = 2048; /**< Character buffer size for reading a comma-separated INI list */
 
 public:
     /**
@@ -62,6 +64,14 @@ public:
      */
     static auto getRimQuality() -> int;
 
+    /**
+     * @brief Whether a worldspace is on the user's blocklist (sWorldSpaceBlocklist)
+     *
+     * @param editorID Worldspace editor ID to test, compared case-insensitively
+     * @return bool True if the skirt must not be built in this worldspace; nullptr or empty IDs are never blocked
+     */
+    static auto isWorldSpaceBlocked(const char* editorID) -> bool;
+
 private:
     /**
      * @brief Reads a single float value from the [General] section of an INI file
@@ -74,6 +84,19 @@ private:
     static auto readIniFloat(const std::filesystem::path& path,
                              const wchar_t* key,
                              float defVal) -> float;
+
+    /**
+     * @brief Reads a comma-separated list of strings from the [General] section of an INI file
+     *
+     * Entries are trimmed of surrounding whitespace and empty entries are dropped. A missing
+     * file, missing key, or blank value yields an empty list.
+     *
+     * @param path Path to the INI file
+     * @param key Name of the key to read
+     * @return std::vector<std::string> The parsed entries
+     */
+    static auto readIniStringList(const std::filesystem::path& path,
+                                  const wchar_t* key) -> std::vector<std::string>;
 };
 
 } // namespace HorizonFix

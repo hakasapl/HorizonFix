@@ -4,8 +4,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <cwchar>
 #include <filesystem>
+#include <string>
+#include <vector>
 
 using namespace HorizonFix;
 
@@ -19,11 +22,20 @@ void ConfigLoader::loadConfig()
     s_config.skirtZOffset = readIniFloat(iniPath, L"fWaterSkirtZOffset", DEFAULT_Z_OFFSET);
     s_config.rimQuality = std::clamp(
         static_cast<int>(readIniFloat(iniPath, L"iWaterSkirtRimQuality", DEFAULT_RIM_QUALITY)), 0, MAX_RIM_QUALITY);
+    s_config.worldSpaceBlocklist = readIniStringList(iniPath, L"sWorldSpaceBlocklist");
 
     // Log the effective values so user reports include them
     spdlog::info("Config Loaded: Water Skirt Radius: {}", s_config.skirtRadius);
     spdlog::info("Config Loaded: Water Skirt Z Offset: {}", s_config.skirtZOffset);
     spdlog::info("Config Loaded: Water Skirt Rim Quality: {}", s_config.rimQuality);
+    std::string blocklistJoined;
+    for (const auto& entry : s_config.worldSpaceBlocklist) {
+        if (!blocklistJoined.empty()) {
+            blocklistJoined += ", ";
+        }
+        blocklistJoined += entry;
+    }
+    spdlog::info("Config Loaded: World Space Blocklist: [{}]", blocklistJoined);
 }
 
 auto ConfigLoader::getSkirtRadius() -> float { return s_config.skirtRadius; }
@@ -31,6 +43,16 @@ auto ConfigLoader::getSkirtRadius() -> float { return s_config.skirtRadius; }
 auto ConfigLoader::getSkirtZOffset() -> float { return s_config.skirtZOffset; }
 
 auto ConfigLoader::getRimQuality() -> int { return s_config.rimQuality; }
+
+auto ConfigLoader::isWorldSpaceBlocked(const char* editorID) -> bool
+{
+    if (editorID == nullptr || *editorID == '\0') {
+        return false;
+    }
+    return std::ranges::any_of(s_config.worldSpaceBlocklist, [editorID](const std::string& entry) -> bool {
+        return _stricmp(entry.c_str(), editorID) == 0;
+    });
+}
 
 auto ConfigLoader::readIniFloat(const std::filesystem::path& path,
                                 const wchar_t* key,
@@ -58,4 +80,44 @@ auto ConfigLoader::readIniFloat(const std::filesystem::path& path,
         return defVal;
     }
     return parsed;
+}
+
+auto ConfigLoader::readIniStringList(const std::filesystem::path& path,
+                                     const wchar_t* key) -> std::vector<std::string>
+{
+    std::vector<std::string> result;
+
+    // check if ini file exists
+    if (!std::filesystem::exists(path)) {
+        return result;
+    }
+
+    // Read the raw value string from the [General] section using the Windows API
+    std::array<wchar_t, INI_LIST_BUFFER_SIZE> buffer {};
+    const auto pathStr = path.wstring();
+    GetPrivateProfileStringW(L"General", key, L"", buffer.data(), static_cast<DWORD>(buffer.size()), pathStr.c_str());
+
+    // Split on commas, trimming surrounding whitespace and dropping empty entries.
+    // Editor IDs are plain ASCII, so narrowing each character is lossless in practice.
+    std::string entry;
+    const auto flushEntry = [&result, &entry]() -> void {
+        const auto first = entry.find_first_not_of(" \t");
+        if (first != std::string::npos) {
+            const auto last = entry.find_last_not_of(" \t");
+            result.emplace_back(entry.substr(first, last - first + 1));
+        }
+        entry.clear();
+    };
+    for (const wchar_t chr : buffer) {
+        if (chr == L'\0') {
+            break;
+        }
+        if (chr == L',') {
+            flushEntry();
+            continue;
+        }
+        entry.push_back(static_cast<char>(chr));
+    }
+    flushEntry();
+    return result;
 }
