@@ -17,22 +17,18 @@ void ConfigLoader::loadConfig()
     // Read every key from [General]; each falls back to its default independently
     s_config.skirtRadius = readIniFloat(iniPath, L"fWaterSkirtRadius", DEFAULT_RADIUS);
     s_config.skirtZOffset = readIniFloat(iniPath, L"fWaterSkirtZOffset", DEFAULT_Z_OFFSET);
-    s_config.waterDrawLast = readIniFloat(iniPath, L"bWaterSkirtDrawLast", DEFAULT_WATER_DRAW_LAST) != 0.0F;
     s_config.rimQuality = std::clamp(
         static_cast<int>(readIniFloat(iniPath, L"iWaterSkirtRimQuality", DEFAULT_RIM_QUALITY)), 0, MAX_RIM_QUALITY);
 
     // Log the effective values so user reports include them
     spdlog::info("Config Loaded: Water Skirt Radius: {}", s_config.skirtRadius);
     spdlog::info("Config Loaded: Water Skirt Z Offset: {}", s_config.skirtZOffset);
-    spdlog::info("Config Loaded: Water Skirt Draw Last: {}", s_config.waterDrawLast);
     spdlog::info("Config Loaded: Water Skirt Rim Quality: {}", s_config.rimQuality);
 }
 
 auto ConfigLoader::getSkirtRadius() -> float { return s_config.skirtRadius; }
 
 auto ConfigLoader::getSkirtZOffset() -> float { return s_config.skirtZOffset; }
-
-auto ConfigLoader::getWaterDrawLast() -> bool { return s_config.waterDrawLast; }
 
 auto ConfigLoader::getRimQuality() -> int { return s_config.rimQuality; }
 

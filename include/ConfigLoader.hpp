@@ -16,7 +16,6 @@ private:
     //
     constexpr static float DEFAULT_RADIUS = 2000000.0F; /**< Default skirt radius in game units (fWaterSkirtRadius) */
     constexpr static float DEFAULT_Z_OFFSET = -10000.0F; /**< Default skirt height offset below LOD water (fWaterSkirtZOffset) */
-    constexpr static float DEFAULT_WATER_DRAW_LAST = 1.0F; /**< Default for bWaterSkirtDrawLast (nonzero = enabled) */
     constexpr static float DEFAULT_RIM_QUALITY = 2.0F; /**< Default rim subdivision level (iWaterSkirtRimQuality) */
     constexpr static int MAX_RIM_QUALITY = 6; /**< Upper clamp for rim quality; each level quadruples potential rim tiles */
 
@@ -26,7 +25,6 @@ private:
     struct ConfigMap {
         float skirtRadius; /**< Radius of the water skirt around the player, in game units */
         float skirtZOffset; /**< Vertical offset applied to the skirt relative to the LOD water height */
-        bool waterDrawLast; /**< Whether skirt tiles attach under the LOD land root so water sorts after terrain */
         int rimQuality; /**< How many times rim tiles may be quad-split to approximate the circular edge */
     };
 
@@ -56,14 +54,6 @@ public:
      * @return float The skirt Z offset value from the configuration
      */
     static auto getSkirtZOffset() -> float;
-
-    /**
-     * @brief Get the Water Draw Last setting
-     *
-     * @return true If water should be drawn last
-     * @return false Otherwise
-     */
-    static auto getWaterDrawLast() -> bool;
 
     /**
      * @brief Get the Rim Quality

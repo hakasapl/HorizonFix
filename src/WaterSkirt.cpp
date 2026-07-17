@@ -606,7 +606,7 @@ void WaterSkirt::updateSkirt()
     // Attaching under the LOD land root instead makes the skirt sort with the
     // terrain pass, so water draws after (on top of) distant land
     auto* attachRoot = root;
-    if (ConfigLoader::getWaterDrawLast() && (tes->lodLandRoot != nullptr)) {
+    if (tes->lodLandRoot != nullptr) {
         attachRoot = tes->lodLandRoot;
     }
     attachRoot->AttachChild(s_skirtRoot.get(), true);
