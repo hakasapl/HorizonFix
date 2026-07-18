@@ -240,20 +240,30 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
         return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "no CPU copy"};
     }
 
-    // Dynamic tri shapes keep their positions in per-frame dynamic data, not in the
-    // static vertex stream, so the CPU copy says nothing about the rendered shape
+    // Dynamic tri shapes keep their rendered positions in per-frame dynamic data, not
+    // in the static vertex stream, so the CPU copy says nothing about the rendered
+    // shape - and cloning a dynamic variant would copy an object whose layout the
+    // rest of this pipeline does not expect. Reject outright (never trust these
+    // through the engine-quad topology gate).
     if (shape->type == RE::BSGeometry::Type::kDynamicTriShape
         || shape->type == RE::BSGeometry::Type::kParticleShaderDynamicTriShape) {
-        return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "dynamic tri shape"};
+        return DonorCheck {.verdict = DonorVerdict::kNotSolidWater, .detail = "dynamic tri shape"};
     }
 
     // Vertex stride: the low nibble of the descriptor is the size in dwords (the engine's
     // convention). Positions sit at offset 0, as three halfs or, with the full-precision
-    // flag, three floats.
+    // flag, three floats. One field-verified exception: engine-built water quads use a
+    // bare layout - descriptor 0x0000100000000004, flags word holding only VF_VERTEX,
+    // stride 16 - whose positions are four FLOATS even though the full-precision flag is
+    // clear (confirmed on 1.6.1170: rendering half-encoded positions through that
+    // descriptor's input layout produced float-reinterpreted garbage). Decoding such
+    // quads as halfs used to misread every engine quad as inconsistent with its bound.
+    constexpr std::uint64_t K_BARE_FLOAT4_DESC = 0x0000100000000004ULL;
     const auto descBits = std::bit_cast<std::uint64_t>(data->vertexDesc);
     const std::size_t stride = (descBits & 0xFU) * 4;
-    const bool fullPrecision = data->vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC);
-    const std::size_t positionSize = fullPrecision ? 3 * sizeof(float) : 3 * sizeof(std::uint16_t);
+    const bool floatPositions = data->vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC)
+        || descBits == K_BARE_FLOAT4_DESC;
+    const std::size_t positionSize = floatPositions ? 3 * sizeof(float) : 3 * sizeof(std::uint16_t);
     const std::uint32_t vertexCount = shape->vertexCount;
     const std::uint32_t triangleCount = shape->triangleCount;
     constexpr std::size_t MAX_STRIDE = 64;
@@ -269,7 +279,7 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
     for (std::uint32_t i = 0; i < vertexCount; ++i) {
         const std::uint8_t* const vertex = data->rawVertexData + (static_cast<std::size_t>(i) * stride);
         RE::NiPoint3 pos;
-        if (fullPrecision) {
+        if (floatPositions) {
             std::memcpy(&pos.x, vertex, 3 * sizeof(float));
         } else {
             std::array<std::uint16_t, 3> halves {};
@@ -311,9 +321,9 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
     const float squareness = maxExtent > 0.0F ? std::min(extentX, extentY) / maxExtent : 0.0F;
 
     // The decode is only believable when it agrees with the mesh's own model bound.
-    // Engine-created water quads render positions that are not in the CPU copy (it decodes
-    // as zeros); condemning those would reject the most common - and perfectly square -
-    // donor, so a mismatch is unverifiable rather than bad.
+    // (Engine-built water quads used to trip this gate when their bare-float4 layout
+    // was decoded as halfs - see K_BARE_FLOAT4_DESC above; with the correct decode they
+    // measure properly. The gate remains for meshes whose CPU copy is genuinely stale.)
     const float decodedHalfDiagonal = 0.5F * std::hypot(extentX, extentY);
     const float modelRadius = shape->modelBound.radius;
     const bool decodeConsistent = modelRadius > 0.0F
@@ -473,15 +483,15 @@ void WaterSkirt::buildLayout()
     // plus one so rim tiles that only partially overlap are still considered
     const int span = static_cast<int>(std::ceil(radius / K_TILE_SIZE)) + 1;
 
-    // Walk the square of candidate blocks and let layoutTile trim it to a disc
+    // Walk the square of candidate blocks and let layoutTile trim it to a disc.
+    // The central block is included: SkirtDepth stamps skirt fragments behind
+    // everything, so wherever the game's own water or terrain drew, the inner tile
+    // loses every pixel (early-Z, near free) - but in worldspaces whose LOD water
+    // does not span the player's whole block (small custom maps), it fills what
+    // would otherwise be a grid-aligned hole in the horizon (field-observed as a
+    // missing quadrant when the player stands near a block corner).
     for (int ix = -span; ix <= span; ++ix) {
         for (int iy = -span; iy <= span; ++iy) {
-            // Leave the central block empty: the game's own LOD water
-            // covers the area around the player
-            if (ix == 0 && iy == 0) {
-                continue;
-            }
-
             layoutTile(static_cast<float>(ix) * K_TILE_SIZE,
                        static_cast<float>(iy) * K_TILE_SIZE,
                        K_TILE_SIZE,
@@ -511,7 +521,17 @@ void WaterSkirt::placeTiles(int centerBx,
         // template's model-space center lands on the tile's world position
         // (the skirt root sits at the origin, so local == world here)
         const float scale = rel.size / s_modelSide;
-        const RE::NiPoint3 tileCenter {centerX + rel.dx, centerY + rel.dy, s_skirtHeight};
+
+        // The 3x3 blocks around the player share the area where real loaded-cell
+        // water renders. Water passes do not write depth, so two coplanar
+        // translucent surfaces are ordered only by draw order - which is not
+        // stable, and flickers. Dip just the near tiles below the water plane;
+        // they only ever win pixels nothing else drew, so the dip itself is
+        // invisible, and the far tiles keep the configured height.
+        const bool nearPlayer = rel.size == K_TILE_SIZE
+            && std::fabs(rel.dx) <= K_TILE_SIZE && std::fabs(rel.dy) <= K_TILE_SIZE;
+        const float tileZ = s_skirtHeight - (nearPlayer ? K_NEAR_TILE_DIP : 0.0F);
+        const RE::NiPoint3 tileCenter {centerX + rel.dx, centerY + rel.dy, tileZ};
         tile->local.scale = scale;
         tile->local.translate = tileCenter - s_modelCenter * scale;
         tile->Update(updateData);

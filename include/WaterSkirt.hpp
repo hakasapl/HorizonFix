@@ -32,6 +32,7 @@ private:
 
     static constexpr float K_TILE_SIZE = 131072.0F; /**< Base tile edge length: one LOD32 block (32 cells x 4096 units) */
     static constexpr float K_CULL_PROOF_RADIUS = 1.0e9F; /**< modelBound radius large enough that the engine's frustum test always passes */
+    static constexpr float K_NEAR_TILE_DIP = 32.0F; /**< Extra Z drop for the 3x3 blocks around the player: breaks coplanarity with real loaded-cell water, whose draw order against the skirt is otherwise unstable and flickers. Kept small so the height step stays invisible at the distances it can be seen through */
 
     /**
      * @brief One tile of the skirt layout, relative to the center block's midpoint
@@ -59,10 +60,12 @@ private:
      *
      * kNotSolidWater candidates are always rejected. kUnverifiable ones are trusted only when
      * they have the exact shape signature of an engine-created water quad (4 vertices, 2
-     * triangles): those do not keep their rendered positions in the CPU-side vertex copy, so
-     * they cannot be measured, but they are full square quads by construction. An unverifiable
-     * mesh with any other topology is assumed irregular and rejected - a striped horizon was
-     * traced to exactly that case (a 6-vertex donor whose geometry could not be measured).
+     * triangles): full square quads by construction. Engine quads themselves now usually
+     * measure properly (their bare float4 vertex layout is decoded since the 1.6.1170
+     * verification of descriptor 0x0000100000000004), so the topology trust remains only for
+     * meshes with no readable CPU copy at all. An unverifiable mesh with any other topology
+     * is assumed irregular and rejected - a striped horizon was traced to exactly that case
+     * (a 6-vertex donor whose geometry could not be measured).
      */
     enum class DonorVerdict {
         kSolidWater, /**< Measured: one flat, gap-free, square sheet of water */
@@ -255,7 +258,9 @@ private:
     /**
      * @brief Rebuilds s_layout: a disc of tiles out to the effective radius
      *
-     * The central block is left empty because the game's own LOD water covers it.
+     * The central block is included: the depth stamp makes the inner tile lose everywhere
+     * real water or terrain drew, while filling the hole in worldspaces whose LOD water
+     * does not cover the player's whole block.
      */
     static void buildLayout();
 
