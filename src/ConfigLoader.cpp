@@ -24,6 +24,7 @@ void ConfigLoader::loadConfig()
         static_cast<int>(readIniFloat(iniPath, L"iWaterSkirtRimQuality", DEFAULT_RIM_QUALITY)), 0, MAX_RIM_QUALITY);
     s_config.nearWater = readIniFloat(iniPath, L"bWaterSkirtNearWater", DEFAULT_NEAR_WATER ? 1.0F : 0.0F) != 0.0F;
     s_config.worldSpaceBlocklist = readIniStringList(iniPath, L"sWorldSpaceBlocklist");
+    s_config.smallWorldAllowlist = readIniStringList(iniPath, L"sSmallWorldAllowlist");
 
     // Log the effective values so user reports include them
     spdlog::info("Config Loaded: Water Skirt Radius: {}", s_config.skirtRadius);
@@ -38,6 +39,14 @@ void ConfigLoader::loadConfig()
         blocklistJoined += entry;
     }
     spdlog::info("Config Loaded: World Space Blocklist: [{}]", blocklistJoined);
+    std::string allowlistJoined;
+    for (const auto& entry : s_config.smallWorldAllowlist) {
+        if (!allowlistJoined.empty()) {
+            allowlistJoined += ", ";
+        }
+        allowlistJoined += entry;
+    }
+    spdlog::info("Config Loaded: Small World Allowlist: [{}]", allowlistJoined);
 }
 
 auto ConfigLoader::getSkirtRadius() -> float { return s_config.skirtRadius; }
@@ -54,6 +63,16 @@ auto ConfigLoader::isWorldSpaceBlocked(const char* editorID) -> bool
         return false;
     }
     return std::ranges::any_of(s_config.worldSpaceBlocklist, [editorID](const std::string& entry) -> bool {
+        return _stricmp(entry.c_str(), editorID) == 0;
+    });
+}
+
+auto ConfigLoader::isSmallWorldAllowed(const char* editorID) -> bool
+{
+    if (editorID == nullptr || *editorID == '\0') {
+        return false;
+    }
+    return std::ranges::any_of(s_config.smallWorldAllowlist, [editorID](const std::string& entry) -> bool {
         return _stricmp(entry.c_str(), editorID) == 0;
     });
 }

@@ -729,6 +729,22 @@ void WaterSkirt::updateSkirt()
         return;
     }
 
+    // Small World worldspaces (cities, pocket worlds) get no skirt by default:
+    // their NAM4 is unreliable and their local water sits at street-level heights,
+    // which paints skirt water where it does not belong (field-observed in
+    // Whiterun). Legitimate small worlds opt back in via sSmallWorldAllowlist.
+    if (worldSpace->flags.any(RE::TESWorldSpace::Flag::kSmallWorld)
+        && !ConfigLoader::isSmallWorldAllowed(worldSpace->GetFormEditorID())) {
+        static const RE::TESWorldSpace* lastSmallWorldLogged = nullptr;
+        if (lastSmallWorldLogged != worldSpace) {
+            lastSmallWorldLogged = worldSpace;
+            spdlog::info("Water skirt disabled for {}: Small World worldspace (add to sSmallWorldAllowlist to enable)",
+                         worldSpace->GetFormEditorID());
+        }
+        removeSkirt();
+        return;
+    }
+
     // The scene-graph root the game hangs its LOD water under; the template
     // search runs below it and the skirt normally attaches to it
     auto* const root = tes->objLODWaterRoot;

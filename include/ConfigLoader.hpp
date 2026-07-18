@@ -29,6 +29,7 @@ private:
         int rimQuality; /**< How many times rim tiles may be quad-split to approximate the circular edge */
         bool nearWater; /**< Whether the 3x3 blocks around the player carry skirt water (subtile system); off = the whole 3x3 is left empty and only the far field is tiled */
         std::vector<std::string> worldSpaceBlocklist; /**< Worldspace editor IDs where the skirt is disabled (sWorldSpaceBlocklist) */
+        std::vector<std::string> smallWorldAllowlist; /**< Small World-flagged worldspace editor IDs where the skirt is enabled anyway (sSmallWorldAllowlist) */
     };
 
     static inline ConfigMap s_config; /**< Holds the current configuration values for the plugin */
@@ -84,6 +85,18 @@ public:
      * @return bool True if the skirt must not be built in this worldspace; nullptr or empty IDs are never blocked
      */
     static auto isWorldSpaceBlocked(const char* editorID) -> bool;
+
+    /**
+     * @brief Whether a Small World-flagged worldspace is on the user's allowlist (sSmallWorldAllowlist)
+     *
+     * Small World worldspaces (cities, pocket worlds) get no skirt by default; entries here
+     * re-enable it for specific worlds (e.g. custom maps that are flagged small but represent
+     * open terrain).
+     *
+     * @param editorID Worldspace editor ID to test, compared case-insensitively
+     * @return bool True if the skirt may be built despite the Small World flag
+     */
+    static auto isSmallWorldAllowed(const char* editorID) -> bool;
 
 private:
     /**
