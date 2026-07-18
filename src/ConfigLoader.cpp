@@ -22,12 +22,14 @@ void ConfigLoader::loadConfig()
     s_config.skirtZOffset = readIniFloat(iniPath, L"fWaterSkirtZOffset", DEFAULT_Z_OFFSET);
     s_config.rimQuality = std::clamp(
         static_cast<int>(readIniFloat(iniPath, L"iWaterSkirtRimQuality", DEFAULT_RIM_QUALITY)), 0, MAX_RIM_QUALITY);
+    s_config.nearWater = readIniFloat(iniPath, L"bWaterSkirtNearWater", DEFAULT_NEAR_WATER ? 1.0F : 0.0F) != 0.0F;
     s_config.worldSpaceBlocklist = readIniStringList(iniPath, L"sWorldSpaceBlocklist");
 
     // Log the effective values so user reports include them
     spdlog::info("Config Loaded: Water Skirt Radius: {}", s_config.skirtRadius);
     spdlog::info("Config Loaded: Water Skirt Z Offset: {}", s_config.skirtZOffset);
     spdlog::info("Config Loaded: Water Skirt Rim Quality: {}", s_config.rimQuality);
+    spdlog::info("Config Loaded: Water Skirt Near Water: {}", s_config.nearWater);
     std::string blocklistJoined;
     for (const auto& entry : s_config.worldSpaceBlocklist) {
         if (!blocklistJoined.empty()) {
@@ -43,6 +45,8 @@ auto ConfigLoader::getSkirtRadius() -> float { return s_config.skirtRadius; }
 auto ConfigLoader::getSkirtZOffset() -> float { return s_config.skirtZOffset; }
 
 auto ConfigLoader::getRimQuality() -> int { return s_config.rimQuality; }
+
+auto ConfigLoader::getNearWaterEnabled() -> bool { return s_config.nearWater; }
 
 auto ConfigLoader::isWorldSpaceBlocked(const char* editorID) -> bool
 {

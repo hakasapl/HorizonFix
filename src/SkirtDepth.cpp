@@ -119,7 +119,10 @@ auto SkirtDepth::getNoClipState(REX::W32::ID3D11RasterizerState* currentPtr) -> 
     }
 
     // Copy the current state's description (or the D3D11 defaults when nothing
-    // is bound) and turn off depth clipping — the one field we care about
+    // is bound), turn off depth clipping, and push the fragments a fixed margin
+    // of depth-buffer quanta behind their true depth (see K_SKIRT_DEPTH_BIAS:
+    // guarantees the skirt loses against the coplanar real water at any distance,
+    // where a world-space height offset cannot)
     REX::W32::D3D11_RASTERIZER_DESC desc {};
     if (currentPtr != nullptr) {
         currentPtr->GetDesc(&desc);
@@ -129,6 +132,9 @@ auto SkirtDepth::getNoClipState(REX::W32::ID3D11RasterizerState* currentPtr) -> 
         desc.cullMode = REX::W32::D3D11_CULL_BACK;
     }
     desc.depthClipEnable = 0;
+    desc.depthBias = K_SKIRT_DEPTH_BIAS;
+    desc.depthBiasClamp = 0.0F;
+    desc.slopeScaledDepthBias = 0.0F;
 
     REX::W32::ID3D11RasterizerState* created = nullptr;
     if (device->CreateRasterizerState(&desc, &created) < 0 || created == nullptr) {

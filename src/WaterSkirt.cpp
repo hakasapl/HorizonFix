@@ -372,6 +372,97 @@ void WaterSkirt::updateVisibility()
     const float centerX = (static_cast<float>(s_centerBx) + 0.5F) * K_TILE_SIZE;
     const float centerY = (static_cast<float>(s_centerBy) + 0.5F) * K_TILE_SIZE;
 
+    // Live water footprints, refreshed every frame: near tiles the game's real
+    // water overlaps must not draw. Two translucent surfaces at the same height
+    // composite by draw order, which varies per frame (multithreaded pass
+    // accumulation) and flickers from any angle; the skirt must simply not
+    // rasterize there. Whatever hides a piece of skirt is water rendering those
+    // pixels, so hiding cannot open a hole - and in worldspaces without water
+    // coverage (the small-map void case) nothing overlaps, so everything fills.
+    // All near-water bookkeeping below only exists while the near-water system is
+    // enabled; without it the layout carries no subtiles and no near full tiles
+    // that need representation logic
+    const bool nearWaterEnabled = ConfigLoader::getNearWaterEnabled();
+
+    // Footprints are XY rectangles. The engine's own multibound AABBs are exact;
+    // the shape's sphere bound is only a fallback - a big water mesh's bounding
+    // circle overhangs its true rectangle by up to ~40% of its half-width, and
+    // hiding on the overhang punches a thin arc of missing skirt beside large
+    // waters (field-observed in Apocrypha).
+    struct WaterFootprint {
+        float x;
+        float y;
+        float halfX;
+        float halfY;
+    };
+    static std::vector<WaterFootprint> footprints;
+    footprints.clear();
+    if (auto* const waterSystem = RE::TESWaterSystem::GetSingleton(); nearWaterEnabled && waterSystem != nullptr) {
+        const RE::BSSpinLockGuard locker(waterSystem->lock);
+        for (const auto& waterObject : waterSystem->waterObjects) {
+            if (!waterObject) {
+                continue;
+            }
+            bool hasBox = false;
+            for (const auto& box : waterObject->multiBounds) {
+                if (box && box->size.x > 0.0F && box->size.y > 0.0F) {
+                    hasBox = true;
+                    footprints.push_back(WaterFootprint {box->center.x, box->center.y, box->size.x, box->size.y});
+                }
+            }
+            if (!hasBox && waterObject->shape && waterObject->shape->worldBound.radius > 0.0F) {
+                const auto& waterBound = waterObject->shape->worldBound;
+                footprints.push_back(
+                    WaterFootprint {waterBound.center.x, waterBound.center.y, waterBound.radius, waterBound.radius});
+            }
+        }
+    }
+
+    // Union coverage of live water over the near zone, rasterized at cell
+    // resolution: a cell is marked only when a water box covers it COMPLETELY, so
+    // a subtile whose cells are all marked is fully inside the union of water -
+    // bodies assembled from many cell-sized planes (rivers, seas) mark their
+    // interior correctly, and partially-covered edge cells stay unmarked.
+    constexpr float CELL = 4096.0F;
+    constexpr int GRID = static_cast<int>((3.0F * K_TILE_SIZE) / CELL); // 96 x 96 cells over the 3x3 blocks
+    constexpr float EPSILON = 0.01F; // tolerance in cells for float noise on cell-aligned boxes
+    static std::array<std::array<bool, GRID>, GRID> covered;
+    for (auto& row : covered) {
+        row.fill(false);
+    }
+    const float coverOriginX = centerX - (1.5F * K_TILE_SIZE);
+    const float coverOriginY = centerY - (1.5F * K_TILE_SIZE);
+    for (const auto& footprint : footprints) {
+        const int firstX = std::max(0, static_cast<int>(std::ceil(((footprint.x - footprint.halfX - coverOriginX) / CELL) - EPSILON)));
+        const int endX = std::min(GRID, static_cast<int>(std::floor(((footprint.x + footprint.halfX - coverOriginX) / CELL) + EPSILON)));
+        const int firstY = std::max(0, static_cast<int>(std::ceil(((footprint.y - footprint.halfY - coverOriginY) / CELL) - EPSILON)));
+        const int endY = std::min(GRID, static_cast<int>(std::floor(((footprint.y + footprint.halfY - coverOriginY) / CELL) + EPSILON)));
+        for (int cellX = firstX; cellX < endX; ++cellX) {
+            for (int cellY = firstY; cellY < endY; ++cellY) {
+                covered.at(cellX).at(cellY) = true;
+            }
+        }
+    }
+
+    // Which of the 3x3 near blocks currently touch live water. Water-free blocks
+    // render as their single full tile (subtiles hidden - no extra draw calls);
+    // water-touched blocks render as subtiles with the fully-covered ones hidden.
+    std::array<std::array<bool, 3>, 3> nearBlockHasWater {};
+    for (int blockX = -1; blockX <= 1; ++blockX) {
+        for (int blockY = -1; blockY <= 1; ++blockY) {
+            const float blockCenterX = centerX + (static_cast<float>(blockX) * K_TILE_SIZE);
+            const float blockCenterY = centerY + (static_cast<float>(blockY) * K_TILE_SIZE);
+            constexpr float HALF_BLOCK = K_TILE_SIZE * 0.5F;
+            for (const auto& footprint : footprints) {
+                if (std::fabs(footprint.x - blockCenterX) <= HALF_BLOCK + footprint.halfX
+                    && std::fabs(footprint.y - blockCenterY) <= HALF_BLOCK + footprint.halfY) {
+                    nearBlockHasWater.at(blockX + 1).at(blockY + 1) = true;
+                    break;
+                }
+            }
+        }
+    }
+
     const std::size_t count = std::min(s_tiles.size(), s_layout.size());
     for (std::size_t i = 0; i < count; ++i) {
         const auto& tile = s_tiles[i];
@@ -385,6 +476,49 @@ void WaterSkirt::updateVisibility()
         RE::NiBound bound {};
         bound.center = RE::NiPoint3 {centerX + rel.dx, centerY + rel.dy, s_skirtHeight};
         bound.radius = rel.size;
+
+        // Near-block representation choice (see buildLayout): a full near tile
+        // draws only while its block is water-free; subtiles draw only when the
+        // block touches water, minus the ones a footprint overlaps
+        bool hiddenByWater = false;
+        const bool nearFullTile = rel.size == K_TILE_SIZE
+            && std::fabs(rel.dx) <= K_TILE_SIZE && std::fabs(rel.dy) <= K_TILE_SIZE;
+        if (nearWaterEnabled && (nearFullTile || rel.size == K_NEAR_SUBTILE_SIZE)) {
+            const int blockX = static_cast<int>(std::lround(rel.dx / K_TILE_SIZE));
+            const int blockY = static_cast<int>(std::lround(rel.dy / K_TILE_SIZE));
+            // rim tiles can match the subtile size at high rim quality; they sit
+            // outside the 3x3 blocks and are excluded by the range check
+            if (blockX >= -1 && blockX <= 1 && blockY >= -1 && blockY <= 1) {
+                const bool blockHasWater = nearBlockHasWater.at(blockX + 1).at(blockY + 1);
+                if (nearFullTile) {
+                    hiddenByWater = blockHasWater;
+                } else if (!blockHasWater) {
+                    hiddenByWater = true; // the full tile represents this block
+                } else {
+                    // Hide only subtiles FULLY inside the water union. Edge-straddling
+                    // subtiles keep drawing through the boundary - hiding them whole
+                    // left a sliver of uncovered void along water edges. The overlap
+                    // they create is safe: over void the water reads far depth and
+                    // renders opaque (order cannot matter), and at shorelines the
+                    // shallow bed is opaque and the depth bias drops skirt fragments
+                    // behind it before any compositing question arises.
+                    const float half = rel.size * 0.5F;
+                    const int firstCellX = static_cast<int>(std::lround((rel.dx - half + (1.5F * K_TILE_SIZE)) / CELL));
+                    const int firstCellY = static_cast<int>(std::lround((rel.dy - half + (1.5F * K_TILE_SIZE)) / CELL));
+                    constexpr int CELLS_PER_SUBTILE = static_cast<int>(K_NEAR_SUBTILE_SIZE / CELL);
+                    hiddenByWater = true;
+                    for (int cellX = firstCellX; hiddenByWater && cellX < firstCellX + CELLS_PER_SUBTILE; ++cellX) {
+                        for (int cellY = firstCellY; cellY < firstCellY + CELLS_PER_SUBTILE; ++cellY) {
+                            if (cellX < 0 || cellX >= GRID || cellY < 0 || cellY >= GRID
+                                || !covered.at(cellX).at(cellY)) {
+                                hiddenByWater = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Every tile lies past the far plane, so testing the true bound would fail
         // the far-plane check for all of them. Project the bound toward the camera
@@ -400,7 +534,7 @@ void WaterSkirt::updateVisibility()
 
         // Only touch the cull flag when the state actually changes, to avoid
         // needless scene-graph dirtying
-        const bool visible = boundInFrustum(bound, planes);
+        const bool visible = !hiddenByWater && boundInFrustum(bound, planes);
         if (tile->flags.any(RE::NiAVObject::Flag::kHidden) == visible) {
             tile->SetAppCulled(!visible);
         }
@@ -492,6 +626,43 @@ void WaterSkirt::buildLayout()
     // missing quadrant when the player stands near a block corner).
     for (int ix = -span; ix <= span; ++ix) {
         for (int iy = -span; iy <= span; ++iy) {
+            // The 3x3 blocks around the player carry two interchangeable
+            // representations: the full tile, drawn while no live water touches
+            // the block (one draw call), and an 8x8 grid of subtiles used when
+            // water overlaps the block so that exactly the overlapped pieces can
+            // be hidden. Two translucent surfaces at the same height composite by
+            // draw order, which varies per frame (multithreaded pass accumulation)
+            // and flickers; depth tricks cannot fix compositing order, so the
+            // skirt simply must not rasterize where live water renders. Hiding an
+            // overlapped subtile never opens a hole: whatever hid it is water
+            // rendering those very pixels. updateVisibility shows exactly one
+            // representation per frame.
+            if (ix >= -1 && ix <= 1 && iy >= -1 && iy <= 1) {
+                // Near-water disabled (bWaterSkirtNearWater = 0): the whole 3x3
+                // around the player stays empty - the skirt only covers the far
+                // field, and the loaded area is the game's own to fill
+                if (!ConfigLoader::getNearWaterEnabled()) {
+                    continue;
+                }
+
+                s_layout.push_back(RelTile {.dx = static_cast<float>(ix) * K_TILE_SIZE,
+                                            .dy = static_cast<float>(iy) * K_TILE_SIZE,
+                                            .size = K_TILE_SIZE});
+                constexpr int DIVISIONS = static_cast<int>(K_TILE_SIZE / K_NEAR_SUBTILE_SIZE);
+                for (int sx = 0; sx < DIVISIONS; ++sx) {
+                    for (int sy = 0; sy < DIVISIONS; ++sy) {
+                        const float offset = (static_cast<float>(DIVISIONS) - 1.0F) * 0.5F;
+                        s_layout.push_back(RelTile {
+                            .dx = (static_cast<float>(ix) * K_TILE_SIZE)
+                                + ((static_cast<float>(sx) - offset) * K_NEAR_SUBTILE_SIZE),
+                            .dy = (static_cast<float>(iy) * K_TILE_SIZE)
+                                + ((static_cast<float>(sy) - offset) * K_NEAR_SUBTILE_SIZE),
+                            .size = K_NEAR_SUBTILE_SIZE});
+                    }
+                }
+                continue;
+            }
+
             layoutTile(static_cast<float>(ix) * K_TILE_SIZE,
                        static_cast<float>(iy) * K_TILE_SIZE,
                        K_TILE_SIZE,
@@ -521,17 +692,7 @@ void WaterSkirt::placeTiles(int centerBx,
         // template's model-space center lands on the tile's world position
         // (the skirt root sits at the origin, so local == world here)
         const float scale = rel.size / s_modelSide;
-
-        // The 3x3 blocks around the player share the area where real loaded-cell
-        // water renders. Water passes do not write depth, so two coplanar
-        // translucent surfaces are ordered only by draw order - which is not
-        // stable, and flickers. Dip just the near tiles below the water plane;
-        // they only ever win pixels nothing else drew, so the dip itself is
-        // invisible, and the far tiles keep the configured height.
-        const bool nearPlayer = rel.size == K_TILE_SIZE
-            && std::fabs(rel.dx) <= K_TILE_SIZE && std::fabs(rel.dy) <= K_TILE_SIZE;
-        const float tileZ = s_skirtHeight - (nearPlayer ? K_NEAR_TILE_DIP : 0.0F);
-        const RE::NiPoint3 tileCenter {centerX + rel.dx, centerY + rel.dy, tileZ};
+        const RE::NiPoint3 tileCenter {centerX + rel.dx, centerY + rel.dy, s_skirtHeight};
         tile->local.scale = scale;
         tile->local.translate = tileCenter - s_modelCenter * scale;
         tile->Update(updateData);

@@ -32,7 +32,7 @@ private:
 
     static constexpr float K_TILE_SIZE = 131072.0F; /**< Base tile edge length: one LOD32 block (32 cells x 4096 units) */
     static constexpr float K_CULL_PROOF_RADIUS = 1.0e9F; /**< modelBound radius large enough that the engine's frustum test always passes */
-    static constexpr float K_NEAR_TILE_DIP = 32.0F; /**< Extra Z drop for the 3x3 blocks around the player: breaks coplanarity with real loaded-cell water, whose draw order against the skirt is otherwise unstable and flickers. Kept small so the height step stays invisible at the distances it can be seen through */
+    static constexpr float K_NEAR_SUBTILE_SIZE = K_TILE_SIZE / 8.0F; /**< Edge length of the subtile representation of the 3x3 near blocks (16384 = 4 cells). Each near block carries both a full tile (drawn while the block is water-free - one draw call) and this 8x8 grid (drawn when live water touches the block, minus the overlapped pieces); updateVisibility shows one representation per frame */
 
     /**
      * @brief One tile of the skirt layout, relative to the center block's midpoint

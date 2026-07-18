@@ -8,9 +8,11 @@ namespace HorizonFix {
  *
  * Skirt geometry lies past the far clip plane, so by default the rasterizer would clip every
  * fragment. This class hooks BSWaterShader::SetupGeometry/RestoreGeometry and, for skirt passes
- * only, (1) swaps in a rasterizer state with depth clipping disabled and (2) narrows the viewport
- * depth range so the clamped fragments land at K_BACKDROP_DEPTH. The result: skirt pixels pass the
- * depth test only where nothing else rendered (the horizon gap) and never overdraw real geometry.
+ * only, (1) swaps in a rasterizer state with depth clipping disabled and a constant depth bias
+ * (K_SKIRT_DEPTH_BIAS, so coplanar real water always beats the skirt at any distance), and
+ * (2) narrows the viewport depth range so clamped beyond-far fragments land at K_BACKDROP_DEPTH.
+ * The result: skirt pixels pass the depth test only where nothing else rendered (the horizon
+ * gap) and never overdraw real geometry - including the game's own water at the same height.
  */
 class SkirtDepth {
 private:
@@ -26,6 +28,20 @@ private:
     // everything more than a handful of units inside the far plane. Exactly
     // representable in both D24 and D32F buffers.
     static constexpr float K_BACKDROP_DEPTH = 1.0F - (8.0F / 16777216.0F);
+
+    // Constant rasterizer depth bias for skirt passes, in depth-buffer quanta.
+    // Skirt tiles are coplanar with the game's real water around the player; both
+    // depth-test against each other, and two identical planes land within rounding
+    // of the same depth, so which one wins varies per pixel and per frame
+    // (flicker). A world-space height offset cannot fix this at range - any fixed
+    // dip eventually shrinks below depth precision at distance (field-observed
+    // from high viewpoints) and a larger dip shows as a seam. A bias in DEPTH
+    // UNITS pushes every skirt fragment a guaranteed margin behind its true depth
+    // at every distance, so the skirt reliably loses against coplanar water while
+    // still winning the empty horizon (bias can only make the skirt lose more,
+    // never win wrongly). 256 quanta ~= 1.5e-5 depth: far above coplanar rounding,
+    // far below any real geometric separation.
+    static constexpr std::int32_t K_SKIRT_DEPTH_BIAS = 256;
 
     // State between a Setup/Restore pair; water passes render on a single thread.
     static inline std::array<REX::W32::D3D11_VIEWPORT, K_MAX_VIEWPORTS> s_savedViewports {}; /**< Viewports bound before Setup adjusted them */
