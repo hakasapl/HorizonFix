@@ -33,6 +33,9 @@ private:
     static constexpr float K_TILE_SIZE = 131072.0F; /**< Base tile edge length: one LOD32 block (32 cells x 4096 units) */
     static constexpr float K_CULL_PROOF_RADIUS = 1.0e9F; /**< modelBound radius large enough that the engine's frustum test always passes */
     static constexpr float K_NEAR_SUBTILE_SIZE = K_TILE_SIZE / 8.0F; /**< Edge length of the subtile representation of the 3x3 near blocks (16384 = 4 cells). Each near block carries both a full tile (drawn while the block is water-free - one draw call) and this 8x8 grid (drawn when live water touches the block, minus the overlapped pieces); updateVisibility shows one representation per frame */
+    static constexpr float K_COVERAGE_CELL = 4096.0F; /**< Cell edge of the near-zone water coverage grid (one game cell) */
+    static constexpr int K_COVERAGE_GRID = static_cast<int>((3.0F * K_TILE_SIZE) / K_COVERAGE_CELL); /**< Coverage grid cells per axis over the 3x3 near blocks */
+    static constexpr float K_COVERAGE_EPSILON = 0.01F; /**< Tolerance in cells for float noise on cell-aligned water boxes */
 
     /**
      * @brief One tile of the skirt layout, relative to the center block's midpoint
@@ -41,6 +44,34 @@ private:
         float dx; /**< X offset of the tile center from the layout center */
         float dy; /**< Y offset of the tile center from the layout center */
         float size; /**< Edge length of the tile */
+    };
+
+    /**
+     * @brief XY rectangle of one live water piece
+     *
+     * Taken from the engine's multibound AABBs when present (exact), or from the shape's
+     * sphere bound as a fallback - a big water mesh's bounding circle overhangs its true
+     * rectangle by up to ~40% of its half-width, and hiding skirt on the overhang punches
+     * a thin arc of missing skirt beside large waters (field-observed in Apocrypha).
+     */
+    struct WaterFootprint {
+        float x; /**< World X of the rectangle center */
+        float y; /**< World Y of the rectangle center */
+        float halfX; /**< Half-extent along X */
+        float halfY; /**< Half-extent along Y */
+    };
+
+    /**
+     * @brief Per-frame picture of where the game's real water renders in the near zone
+     *
+     * Refreshed by refreshNearWaterCoverage, consumed by isHiddenByNearWater to pick each
+     * near block's representation and to hide the skirt pieces real water covers.
+     */
+    struct NearWaterCoverage {
+        bool enabled = false; /**< Snapshot of bWaterSkirtNearWater for this frame */
+        std::vector<WaterFootprint> footprints; /**< Live water rectangles */
+        std::array<std::array<bool, K_COVERAGE_GRID>, K_COVERAGE_GRID> covered {}; /**< Cells fully inside the water union */
+        std::array<std::array<bool, 3>, 3> blockHasWater {}; /**< Which of the 3x3 near blocks touch any water */
     };
 
     static inline std::vector<RE::NiPointer<RE::BSGeometry>> s_tiles; /**< Live tile geometries, index-matched to s_layout */
@@ -54,6 +85,7 @@ private:
     static inline float s_skirtHeight; /**< World Z the tiles sit at: LOD water height plus the configured offset */
     static inline std::atomic_bool s_taskPending; /**< Coalesces queueUpdate calls into a single queued task */
     static inline bool s_mapMenuOpen = false; /**< True while the map menu is open and the skirt is force-hidden */
+    static inline NearWaterCoverage s_nearWater; /**< Live water picture for the current frame (see updateVisibility) */
 
     /**
      * @brief What classifyDonor concluded about a candidate donor mesh
@@ -228,6 +260,42 @@ private:
      * @return DonorCheck The verdict plus a short reason string for logging
      */
     static auto classifyDonor(const RE::BSTriShape* shape) -> DonorCheck;
+
+    /**
+     * @brief Decodes an IEEE 754 half-precision value (how vertex layouts without the
+     * full-precision flag store positions)
+     *
+     * @param half The 16-bit pattern to decode
+     * @return float The decoded value
+     */
+    static auto halfToFloat(std::uint16_t half) -> float;
+
+    /**
+     * @brief Rebuilds the per-frame picture of where the game's real water renders (s_nearWater)
+     *
+     * Gathers live water rectangles from the water system (multibound AABBs first, sphere
+     * bounds as fallback), rasterizes their union onto the near-zone coverage grid at cell
+     * resolution - a cell is marked only when a box covers it completely - and records which
+     * of the 3x3 near blocks touch water. Left empty while the near-water system is disabled.
+     *
+     * @param centerX World X of the layout center
+     * @param centerY World Y of the layout center
+     */
+    static void refreshNearWaterCoverage(float centerX,
+                                         float centerY);
+
+    /**
+     * @brief Whether a near tile must not draw this frame because of the game's real water
+     *
+     * Implements the near-block representation choice (see buildLayout): a full near tile
+     * draws only while its block is water-free; subtiles draw only when the block touches
+     * water, minus those fully inside the water union. Edge-straddling subtiles keep drawing
+     * through the boundary - see the implementation for why that overlap is safe.
+     *
+     * @param rel Layout entry of the tile
+     * @return bool True when the tile must be hidden this frame
+     */
+    static auto isHiddenByNearWater(const RelTile& rel) -> bool;
 
     /**
      * @brief The configured skirt radius, clamped to a workable minimum of four tile lengths

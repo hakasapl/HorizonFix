@@ -31,22 +31,18 @@ void ConfigLoader::loadConfig()
     spdlog::info("Config Loaded: Water Skirt Z Offset: {}", s_config.skirtZOffset);
     spdlog::info("Config Loaded: Water Skirt Rim Quality: {}", s_config.rimQuality);
     spdlog::info("Config Loaded: Water Skirt Near Water: {}", s_config.nearWater);
-    std::string blocklistJoined;
-    for (const auto& entry : s_config.worldSpaceBlocklist) {
-        if (!blocklistJoined.empty()) {
-            blocklistJoined += ", ";
+    const auto joinList = [](const std::vector<std::string>& list) -> std::string {
+        std::string joined;
+        for (const auto& entry : list) {
+            if (!joined.empty()) {
+                joined += ", ";
+            }
+            joined += entry;
         }
-        blocklistJoined += entry;
-    }
-    spdlog::info("Config Loaded: World Space Blocklist: [{}]", blocklistJoined);
-    std::string allowlistJoined;
-    for (const auto& entry : s_config.smallWorldAllowlist) {
-        if (!allowlistJoined.empty()) {
-            allowlistJoined += ", ";
-        }
-        allowlistJoined += entry;
-    }
-    spdlog::info("Config Loaded: Small World Allowlist: [{}]", allowlistJoined);
+        return joined;
+    };
+    spdlog::info("Config Loaded: World Space Blocklist: [{}]", joinList(s_config.worldSpaceBlocklist));
+    spdlog::info("Config Loaded: Small World Allowlist: [{}]", joinList(s_config.smallWorldAllowlist));
 }
 
 auto ConfigLoader::getSkirtRadius() -> float { return s_config.skirtRadius; }
@@ -59,20 +55,21 @@ auto ConfigLoader::getNearWaterEnabled() -> bool { return s_config.nearWater; }
 
 auto ConfigLoader::isWorldSpaceBlocked(const char* editorID) -> bool
 {
-    if (editorID == nullptr || *editorID == '\0') {
-        return false;
-    }
-    return std::ranges::any_of(s_config.worldSpaceBlocklist, [editorID](const std::string& entry) -> bool {
-        return _stricmp(entry.c_str(), editorID) == 0;
-    });
+    return listContainsID(s_config.worldSpaceBlocklist, editorID);
 }
 
 auto ConfigLoader::isSmallWorldAllowed(const char* editorID) -> bool
 {
+    return listContainsID(s_config.smallWorldAllowlist, editorID);
+}
+
+auto ConfigLoader::listContainsID(const std::vector<std::string>& list,
+                                  const char* editorID) -> bool
+{
     if (editorID == nullptr || *editorID == '\0') {
         return false;
     }
-    return std::ranges::any_of(s_config.smallWorldAllowlist, [editorID](const std::string& entry) -> bool {
+    return std::ranges::any_of(list, [editorID](const std::string& entry) -> bool {
         return _stricmp(entry.c_str(), editorID) == 0;
     });
 }

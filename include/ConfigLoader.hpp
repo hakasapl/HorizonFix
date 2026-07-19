@@ -100,6 +100,16 @@ public:
 
 private:
     /**
+     * @brief Case-insensitive membership test of an editor ID in a config list
+     *
+     * @param list Config entries to search
+     * @param editorID Editor ID to look for; nullptr or empty never matches
+     * @return bool True when the list contains the ID
+     */
+    static auto listContainsID(const std::vector<std::string>& list,
+                               const char* editorID) -> bool;
+
+    /**
      * @brief Reads a single float value from the [General] section of an INI file
      *
      * @param path Path to the INI file
