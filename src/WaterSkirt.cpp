@@ -410,7 +410,6 @@ void WaterSkirt::updateVisibility()
 void WaterSkirt::refreshNearWaterCoverage(float centerX,
                                           float centerY)
 {
-    s_nearWater.enabled = ConfigLoader::getNearWaterEnabled();
     s_nearWater.footprints.clear();
     for (auto& row : s_nearWater.covered) {
         row.fill(false);
@@ -419,8 +418,7 @@ void WaterSkirt::refreshNearWaterCoverage(float centerX,
 
     // Footprints are XY rectangles: the engine's own multibound AABBs when present
     // (exact), the shape's sphere bound as a fallback (see WaterFootprint)
-    if (auto* const waterSystem = RE::TESWaterSystem::GetSingleton();
-        s_nearWater.enabled && waterSystem != nullptr) {
+    if (auto* const waterSystem = RE::TESWaterSystem::GetSingleton(); waterSystem != nullptr) {
         const RE::BSSpinLockGuard locker(waterSystem->lock);
         for (const auto& waterObject : waterSystem->waterObjects) {
             if (!waterObject) {
@@ -490,7 +488,7 @@ auto WaterSkirt::isHiddenByNearWater(const RelTile& rel) -> bool
 {
     const bool nearFullTile = rel.size == K_TILE_SIZE
         && std::fabs(rel.dx) <= K_TILE_SIZE && std::fabs(rel.dy) <= K_TILE_SIZE;
-    if (!s_nearWater.enabled || (!nearFullTile && rel.size != K_NEAR_SUBTILE_SIZE)) {
+    if (!nearFullTile && rel.size != K_NEAR_SUBTILE_SIZE) {
         return false;
     }
 
@@ -628,13 +626,6 @@ void WaterSkirt::buildLayout()
             // rendering those very pixels. updateVisibility shows exactly one
             // representation per frame.
             if (ix >= -1 && ix <= 1 && iy >= -1 && iy <= 1) {
-                // Near-water disabled (bWaterSkirtNearWater = 0): the whole 3x3
-                // around the player stays empty - the skirt only covers the far
-                // field, and the loaded area is the game's own to fill
-                if (!ConfigLoader::getNearWaterEnabled()) {
-                    continue;
-                }
-
                 s_layout.push_back(RelTile {.dx = static_cast<float>(ix) * K_TILE_SIZE,
                                             .dy = static_cast<float>(iy) * K_TILE_SIZE,
                                             .size = K_TILE_SIZE});
@@ -793,9 +784,9 @@ void WaterSkirt::updateSkirt()
         return;
     }
 
-    // The tiles sit at the LOD water height (from whichever worldspace owns the
-    // LOD data), pushed down by the configured Z offset to avoid z-fighting with
-    // the real water
+    // The tiles sit exactly at the LOD water height (from whichever worldspace
+    // owns the LOD data); coplanarity with the game's real water is handled by
+    // the near-water yielding and the skirt depth bias, not by a height offset
     auto* const lodWorldSpace = getLODWorldSpace(worldSpace);
     float waterHeight = lodWorldSpace->lodWaterHeight;
 
@@ -831,7 +822,7 @@ void WaterSkirt::updateSkirt()
         }
     }
 
-    s_skirtHeight = waterHeight + ConfigLoader::getSkirtZOffset();
+    s_skirtHeight = waterHeight;
 
     // Compute the disc of tile positions/sizes around the player's block
     buildLayout();

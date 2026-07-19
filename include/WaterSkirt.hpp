@@ -68,7 +68,6 @@ private:
      * near block's representation and to hide the skirt pieces real water covers.
      */
     struct NearWaterCoverage {
-        bool enabled = false; /**< Snapshot of bWaterSkirtNearWater for this frame */
         std::vector<WaterFootprint> footprints; /**< Live water rectangles */
         std::array<std::array<bool, K_COVERAGE_GRID>, K_COVERAGE_GRID> covered {}; /**< Cells fully inside the water union */
         std::array<std::array<bool, 3>, 3> blockHasWater {}; /**< Which of the 3x3 near blocks touch any water */
@@ -82,7 +81,7 @@ private:
     static inline int s_centerBy; /**< Y index of the LOD32 block the skirt is centered on */
     static inline RE::NiPoint3 s_modelCenter; /**< Center of the template quad in its own model space */
     static inline float s_modelSide; /**< Edge length of the template quad in model space */
-    static inline float s_skirtHeight; /**< World Z the tiles sit at: LOD water height plus the configured offset */
+    static inline float s_skirtHeight; /**< World Z the tiles sit at: the worldspace's effective water height */
     static inline std::atomic_bool s_taskPending; /**< Coalesces queueUpdate calls into a single queued task */
     static inline bool s_mapMenuOpen = false; /**< True while the map menu is open and the skirt is force-hidden */
     static inline NearWaterCoverage s_nearWater; /**< Live water picture for the current frame (see updateVisibility) */
@@ -276,7 +275,7 @@ private:
      * Gathers live water rectangles from the water system (multibound AABBs first, sphere
      * bounds as fallback), rasterizes their union onto the near-zone coverage grid at cell
      * resolution - a cell is marked only when a box covers it completely - and records which
-     * of the 3x3 near blocks touch water. Left empty while the near-water system is disabled.
+     * of the 3x3 near blocks touch water.
      *
      * @param centerX World X of the layout center
      * @param centerY World Y of the layout center

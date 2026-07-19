@@ -15,19 +15,15 @@ private:
     // DEFAULT CFG VALUES
     //
     constexpr static float DEFAULT_RADIUS = 2000000.0F; /**< Default skirt radius in game units (fWaterSkirtRadius) */
-    constexpr static float DEFAULT_Z_OFFSET = -10000.0F; /**< Default skirt height offset below LOD water (fWaterSkirtZOffset) */
     constexpr static float DEFAULT_RIM_QUALITY = 2.0F; /**< Default rim subdivision level (iWaterSkirtRimQuality) */
     constexpr static int MAX_RIM_QUALITY = 6; /**< Upper clamp for rim quality; each level quadruples potential rim tiles */
-    constexpr static bool DEFAULT_NEAR_WATER = true; /**< Default for bWaterSkirtNearWater */
 
     /**
      * @brief ConfigMap structure which holds the configuration values for the plugin
      */
     struct ConfigMap {
         float skirtRadius; /**< Radius of the water skirt around the player, in game units */
-        float skirtZOffset; /**< Vertical offset applied to the skirt relative to the LOD water height */
         int rimQuality; /**< How many times rim tiles may be quad-split to approximate the circular edge */
-        bool nearWater; /**< Whether the 3x3 blocks around the player carry skirt water (subtile system); off = the whole 3x3 is left empty and only the far field is tiled */
         std::vector<std::string> worldSpaceBlocklist; /**< Worldspace editor IDs where the skirt is disabled (sWorldSpaceBlocklist) */
         std::vector<std::string> smallWorldAllowlist; /**< Small World-flagged worldspace editor IDs where the skirt is enabled anyway (sSmallWorldAllowlist) */
     };
@@ -54,29 +50,11 @@ public:
     static auto getSkirtRadius() -> float;
 
     /**
-     * @brief Get the Skirt Z Offset
-     *
-     * @return float The skirt Z offset value from the configuration
-     */
-    static auto getSkirtZOffset() -> float;
-
-    /**
      * @brief Get the Rim Quality
      *
      * @return int The rim quality value from the configuration
      */
     static auto getRimQuality() -> int;
-
-    /**
-     * @brief Whether the near-water system is enabled (bWaterSkirtNearWater)
-     *
-     * On: the 3x3 blocks around the player carry skirt water, drawn as one tile per
-     * water-free block and as subtiles yielding to live water otherwise. Off: the
-     * whole 3x3 stays empty and the skirt only covers the far field.
-     *
-     * @return bool True when the near-water system is enabled
-     */
-    static auto getNearWaterEnabled() -> bool;
 
     /**
      * @brief Whether a worldspace is on the user's blocklist (sWorldSpaceBlocklist)
