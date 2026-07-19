@@ -4,9 +4,9 @@
 
 #include <algorithm>
 #include <array>
-#include <cstring>
 #include <cwchar>
 #include <filesystem>
+#include <spdlog/spdlog.h>
 #include <string>
 #include <vector>
 
@@ -61,9 +61,8 @@ auto ConfigLoader::listContainsID(const std::vector<std::string>& list,
     if (editorID == nullptr || *editorID == '\0') {
         return false;
     }
-    return std::ranges::any_of(list, [editorID](const std::string& entry) -> bool {
-        return _stricmp(entry.c_str(), editorID) == 0;
-    });
+    return std::ranges::any_of(
+        list, [editorID](const std::string& entry) -> bool { return _stricmp(entry.c_str(), editorID) == 0; });
 }
 
 auto ConfigLoader::readIniFloat(const std::filesystem::path& path,
@@ -81,7 +80,7 @@ auto ConfigLoader::readIniFloat(const std::filesystem::path& path,
     GetPrivateProfileStringW(L"General", key, L"", buffer.data(), static_cast<DWORD>(buffer.size()), pathStr.c_str());
 
     // Empty result means the key is missing (or blank); use the default
-    if (buffer[0] == L'\0') {
+    if (buffer.at(0) == L'\0') {
         return defVal;
     }
 

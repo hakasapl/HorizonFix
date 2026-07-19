@@ -1,5 +1,10 @@
 #pragma once
 
+#include <cstddef>
+#include <filesystem>
+#include <string>
+#include <vector>
+
 namespace HorizonFix {
 
 /**
@@ -16,16 +21,19 @@ private:
     //
     constexpr static float DEFAULT_RADIUS = 2000000.0F; /**< Default skirt radius in game units (fWaterSkirtRadius) */
     constexpr static float DEFAULT_RIM_QUALITY = 2.0F; /**< Default rim subdivision level (iWaterSkirtRimQuality) */
-    constexpr static int MAX_RIM_QUALITY = 6; /**< Upper clamp for rim quality; each level quadruples potential rim tiles */
+    constexpr static int MAX_RIM_QUALITY
+        = 6; /**< Upper clamp for rim quality; each level quadruples potential rim tiles */
 
     /**
      * @brief ConfigMap structure which holds the configuration values for the plugin
      */
     struct ConfigMap {
-        float skirtRadius; /**< Radius of the water skirt around the player, in game units */
-        int rimQuality; /**< How many times rim tiles may be quad-split to approximate the circular edge */
-        std::vector<std::string> worldSpaceBlocklist; /**< Worldspace editor IDs where the skirt is disabled (sWorldSpaceBlocklist) */
-        std::vector<std::string> smallWorldAllowlist; /**< Small World-flagged worldspace editor IDs where the skirt is enabled anyway (sSmallWorldAllowlist) */
+        float skirtRadius {}; /**< Radius of the water skirt around the player, in game units */
+        int rimQuality {}; /**< How many times rim tiles may be quad-split to approximate the circular edge */
+        std::vector<std::string>
+            worldSpaceBlocklist; /**< Worldspace editor IDs where the skirt is disabled (sWorldSpaceBlocklist) */
+        std::vector<std::string> smallWorldAllowlist; /**< Small World-flagged worldspace editor IDs where the skirt is
+                                                         enabled anyway (sSmallWorldAllowlist) */
     };
 
     static inline ConfigMap s_config; /**< Holds the current configuration values for the plugin */
@@ -34,7 +42,8 @@ private:
     // Hardcoded Settings
     //
     constexpr static size_t INI_BUFFER_SIZE = 64; /**< Character buffer size for reading a single INI value */
-    constexpr static size_t INI_LIST_BUFFER_SIZE = 2048; /**< Character buffer size for reading a comma-separated INI list */
+    constexpr static size_t INI_LIST_BUFFER_SIZE
+        = 2048; /**< Character buffer size for reading a comma-separated INI list */
 
 public:
     /**

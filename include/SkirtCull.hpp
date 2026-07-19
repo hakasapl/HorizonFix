@@ -1,5 +1,9 @@
 #pragma once
 
+#include "PCH.h"
+
+#include <cstddef>
+
 namespace HorizonFix::SkirtCull {
 
 /**

@@ -1,11 +1,20 @@
 #include "ConfigLoader.hpp"
+
 #include "SkirtCull.hpp"
 #include "SkirtDepth.hpp"
 #include "WaterSkirt.hpp"
 
+#include "PCH.h"
+
+#include <spdlog/common.h>
+#include <spdlog/logger.h>
 #include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/spdlog.h>
 
 #include <filesystem>
+#include <memory>
+#include <string>
+#include <utility>
 
 using namespace HorizonFix;
 

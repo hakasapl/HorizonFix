@@ -1,0 +1,16 @@
+Diagnostics:
+  UnusedIncludes: Strict
+  MissingIncludes: Strict
+  # Ignore headers that don't follow the "Include what you use" model
+  Includes:
+    IgnoreHeader:
+      - ".*/Windows Kits/.*"
+      - ".*/RE/.*"
+      - ".*/REL/.*"
+      - ".*/SKSE/.*"
+      - "PCH.h"
+  Suppress:
+    - invalid_consteval_call
+    - default_member_initializer_not_yet_parsed
+  ClangTidy:
+    FastCheckFilter: None

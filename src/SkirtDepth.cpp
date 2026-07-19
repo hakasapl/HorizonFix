@@ -2,7 +2,12 @@
 
 #include "WaterSkirt.hpp"
 
+#include "PCH.h"
+
+#include <spdlog/spdlog.h>
+
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 using namespace HorizonFix;
@@ -43,7 +48,7 @@ void SkirtDepth::SetupGeometryHook::thunk(RE::BSShader* shaderPtr,
 
     // Narrow the viewport depth range so clamped beyond-far-plane fragments land
     // at K_BACKDROP_DEPTH: just inside the 1.0 clear value, behind everything else
-    auto adjusted = s_savedViewports[0];
+    auto adjusted = s_savedViewports.at(0);
     adjusted.maxDepth = K_BACKDROP_DEPTH;
     context->RSSetViewports(1, &adjusted);
     s_adjustedViewport = adjusted;
@@ -161,7 +166,7 @@ void SkirtDepth::install()
 
     // Patch both slots on the BSWaterShader vtable; they bracket every water
     // draw, giving us a per-draw window to swap GPU state in and out
-    REL::Relocation<std::uintptr_t> vtbl {RE::VTABLE_BSWaterShader[0]};
+    REL::Relocation<std::uintptr_t> vtbl {RE::VTABLE_BSWaterShader.at(0)};
     SetupGeometryHook::s_func = vtbl.write_vfunc(SetupGeometryHook::K_INDEX, SetupGeometryHook::thunk);
     RestoreGeometryHook::s_func = vtbl.write_vfunc(RestoreGeometryHook::K_INDEX, RestoreGeometryHook::thunk);
 

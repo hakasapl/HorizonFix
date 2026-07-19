@@ -1,5 +1,13 @@
 #pragma once
 
+#include "PCH.h"
+
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
 namespace HorizonFix {
 
 /**
@@ -15,7 +23,8 @@ namespace HorizonFix {
  */
 class WaterSkirt {
 public:
-    static constexpr const char* K_TILE_NAME = "HSF_WaterSkirt"; /**< Name of tiles; SkirtDepth identifies skirt render passes by this name */
+    static constexpr const char* K_TILE_NAME
+        = "HSF_WaterSkirt"; /**< Name of tiles; SkirtDepth identifies skirt render passes by this name */
     static constexpr const char* K_ROOT_NAME = "HSF_WaterSkirtRoot"; /**< Name of the tile parent node */
 
 private:
@@ -28,14 +37,24 @@ private:
     };
 
     /** @brief The six planes of a view frustum: near, far, left, right, top, bottom */
-    using FrustumPlanes = std::array<FrustumPlane, 6>;
+    static constexpr size_t NUM_FRUSTUM_PLANES = 6;
+    using FrustumPlanes = std::array<FrustumPlane, NUM_FRUSTUM_PLANES>;
 
-    static constexpr float K_TILE_SIZE = 131072.0F; /**< Base tile edge length: one LOD32 block (32 cells x 4096 units) */
-    static constexpr float K_CULL_PROOF_RADIUS = 1.0e9F; /**< modelBound radius large enough that the engine's frustum test always passes */
-    static constexpr float K_NEAR_SUBTILE_SIZE = K_TILE_SIZE / 8.0F; /**< Edge length of the subtile representation of the 3x3 near blocks (16384 = 4 cells). Each near block carries both a full tile (drawn while the block is water-free - one draw call) and this 8x8 grid (drawn when live water touches the block, minus the overlapped pieces); updateVisibility shows one representation per frame */
-    static constexpr float K_COVERAGE_CELL = 4096.0F; /**< Cell edge of the near-zone water coverage grid (one game cell) */
-    static constexpr int K_COVERAGE_GRID = static_cast<int>((3.0F * K_TILE_SIZE) / K_COVERAGE_CELL); /**< Coverage grid cells per axis over the 3x3 near blocks */
-    static constexpr float K_COVERAGE_EPSILON = 0.01F; /**< Tolerance in cells for float noise on cell-aligned water boxes */
+    static constexpr float K_TILE_SIZE
+        = 131072.0F; /**< Base tile edge length: one LOD32 block (32 cells x 4096 units) */
+    static constexpr float K_CULL_PROOF_RADIUS
+        = 1.0e9F; /**< modelBound radius large enough that the engine's frustum test always passes */
+    static constexpr float K_NEAR_SUBTILE_SIZE
+        = K_TILE_SIZE / 8.0F; /**< Edge length of the subtile representation of the 3x3 near blocks (16384 = 4 cells).
+                                 Each near block carries both a full tile (drawn while the block is water-free - one
+                                 draw call) and this 8x8 grid (drawn when live water touches the block, minus the
+                                 overlapped pieces); updateVisibility shows one representation per frame */
+    static constexpr float K_COVERAGE_CELL
+        = 4096.0F; /**< Cell edge of the near-zone water coverage grid (one game cell) */
+    static constexpr int K_COVERAGE_GRID = static_cast<int>(
+        (3.0F * K_TILE_SIZE) / K_COVERAGE_CELL); /**< Coverage grid cells per axis over the 3x3 near blocks */
+    static constexpr float K_COVERAGE_EPSILON
+        = 0.01F; /**< Tolerance in cells for float noise on cell-aligned water boxes */
 
     /**
      * @brief One tile of the skirt layout, relative to the center block's midpoint
@@ -69,13 +88,16 @@ private:
      */
     struct NearWaterCoverage {
         std::vector<WaterFootprint> footprints; /**< Live water rectangles */
-        std::array<std::array<bool, K_COVERAGE_GRID>, K_COVERAGE_GRID> covered {}; /**< Cells fully inside the water union */
+        std::array<std::array<bool, K_COVERAGE_GRID>, K_COVERAGE_GRID>
+            covered {}; /**< Cells fully inside the water union */
         std::array<std::array<bool, 3>, 3> blockHasWater {}; /**< Which of the 3x3 near blocks touch any water */
     };
 
-    static inline std::vector<RE::NiPointer<RE::BSGeometry>> s_tiles; /**< Live tile geometries, index-matched to s_layout */
+    static inline std::vector<RE::NiPointer<RE::BSGeometry>>
+        s_tiles; /**< Live tile geometries, index-matched to s_layout */
     static inline std::vector<RelTile> s_layout; /**< Relative tile layout, rebuilt per worldspace */
-    static inline RE::NiPointer<RE::NiNode> s_skirtRoot; /**< Parent node holding every tile, attached under the LOD roots */
+    static inline RE::NiPointer<RE::NiNode>
+        s_skirtRoot; /**< Parent node holding every tile, attached under the LOD roots */
     static inline RE::TESWorldSpace* s_skirtWorldSpace; /**< Worldspace the current skirt was built for */
     static inline int s_centerBx; /**< X index of the LOD32 block the skirt is centered on */
     static inline int s_centerBy; /**< Y index of the LOD32 block the skirt is centered on */
@@ -98,17 +120,17 @@ private:
      * is assumed irregular and rejected - a striped horizon was traced to exactly that case
      * (a 6-vertex donor whose geometry could not be measured).
      */
-    enum class DonorVerdict {
-        kSolidWater, /**< Measured: one flat, gap-free, square sheet of water */
-        kNotSolidWater, /**< Measured: narrow, gappy, or otherwise not a solid square */
-        kUnverifiable, /**< No usable CPU geometry to measure */
+    enum class DonorVerdict : std::uint8_t {
+        K_SOLID_WATER, /**< Measured: one flat, gap-free, square sheet of water */
+        K_NOT_SOLID_WATER, /**< Measured: narrow, gappy, or otherwise not a solid square */
+        K_UNVERIFIABLE, /**< No usable CPU geometry to measure */
     };
 
     /**
      * @brief classifyDonor result: the verdict plus a short reason for the log
      */
     struct DonorCheck {
-        DonorVerdict verdict = DonorVerdict::kUnverifiable; /**< What the measurement concluded */
+        DonorVerdict verdict = DonorVerdict::K_UNVERIFIABLE; /**< What the measurement concluded */
         const char* detail = "not measured"; /**< Why, in a word or two (log only) */
     };
 
@@ -125,7 +147,8 @@ private:
         std::uint32_t bestVertexCount = 0; /**< Vertex count of best (lower wins) */
         float bestRadius = 0.0F; /**< World bound radius of best (tie-breaker, higher wins) */
         DonorCheck bestCheck; /**< classifyDonor result for best */
-        std::uint32_t rejectedCount = 0; /**< Candidates rejected: measured not solid, or unmeasurable and not quad-shaped */
+        std::uint32_t rejectedCount
+            = 0; /**< Candidates rejected: measured not solid, or unmeasurable and not quad-shaped */
     };
 
 public:

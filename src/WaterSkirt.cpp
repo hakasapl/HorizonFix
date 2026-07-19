@@ -2,41 +2,70 @@
 
 #include "ConfigLoader.hpp"
 
+#include "PCH.h"
+
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <numbers>
+#include <span>
+#include <utility>
 #include <vector>
 
 using namespace HorizonFix;
 
 auto WaterSkirt::halfToFloat(std::uint16_t half) -> float
 {
-    const std::uint32_t sign = static_cast<std::uint32_t>(half & 0x8000U) << 16U;
-    std::int32_t exponent = (half >> 10U) & 0x1F;
-    std::uint32_t mantissa = half & 0x3FFU;
+    // IEEE 754 binary16 (half) and binary32 (float) field layouts
+    constexpr std::uint32_t HALF_MANTISSA_BITS = 10;
+    constexpr std::uint32_t HALF_EXPONENT_BITS = 5;
+    constexpr std::int32_t HALF_EXPONENT_BIAS = 15;
+    constexpr std::uint32_t FLOAT_MANTISSA_BITS = 23;
+    constexpr std::uint32_t FLOAT_EXPONENT_BITS = 8;
+    constexpr std::int32_t FLOAT_EXPONENT_BIAS = 127;
 
-    if (exponent == 0x1F) { // infinity / NaN
-        return std::bit_cast<float>(sign | 0x7F800000U | (mantissa << 13U));
+    // Masks and shifts derived from the layouts
+    constexpr std::uint32_t HALF_SIGN_MASK = 1U << (HALF_EXPONENT_BITS + HALF_MANTISSA_BITS);
+    constexpr std::uint32_t HALF_EXPONENT_MASK = (1U << HALF_EXPONENT_BITS) - 1U;
+    constexpr std::uint32_t HALF_MANTISSA_MASK = (1U << HALF_MANTISSA_BITS) - 1U;
+    constexpr std::uint32_t HALF_IMPLICIT_ONE = 1U << HALF_MANTISSA_BITS;
+    constexpr std::uint32_t SIGN_SHIFT
+        = (FLOAT_EXPONENT_BITS + FLOAT_MANTISSA_BITS) - (HALF_EXPONENT_BITS + HALF_MANTISSA_BITS);
+    constexpr std::uint32_t MANTISSA_SHIFT = FLOAT_MANTISSA_BITS - HALF_MANTISSA_BITS;
+    constexpr std::uint32_t FLOAT_EXPONENT_ALL_ONES = ((1U << FLOAT_EXPONENT_BITS) - 1U) << FLOAT_MANTISSA_BITS;
+    constexpr std::int32_t BIAS_DELTA = FLOAT_EXPONENT_BIAS - HALF_EXPONENT_BIAS;
+
+    const std::uint32_t sign = static_cast<std::uint32_t>(half & HALF_SIGN_MASK) << SIGN_SHIFT;
+    auto exponent = static_cast<std::int32_t>((half >> HALF_MANTISSA_BITS) & HALF_EXPONENT_MASK);
+    std::uint32_t mantissa = half & HALF_MANTISSA_MASK;
+
+    // An all-ones exponent field encodes infinity / NaN
+    if (std::cmp_equal(exponent, HALF_EXPONENT_MASK)) {
+        return std::bit_cast<float>(sign | FLOAT_EXPONENT_ALL_ONES | (mantissa << MANTISSA_SHIFT));
     }
     if (exponent == 0) {
         if (mantissa == 0) { // signed zero
             return std::bit_cast<float>(sign);
         }
         // Subnormal: shift the implicit leading 1 into place, adjusting the exponent
-        while ((mantissa & 0x400U) == 0) {
+        while ((mantissa & HALF_IMPLICIT_ONE) == 0) {
             mantissa <<= 1U;
             --exponent;
         }
         ++exponent;
-        mantissa &= 0x3FFU;
+        mantissa &= HALF_MANTISSA_MASK;
     }
-    // Rebias the exponent from half (15) to float (127)
-    return std::bit_cast<float>(sign | (static_cast<std::uint32_t>(exponent + 112) << 23U) | (mantissa << 13U));
+    // Rebias the raw exponent from half to float: value = raw - HALF_EXPONENT_BIAS,
+    // so the float's raw field is value + FLOAT_EXPONENT_BIAS = raw + BIAS_DELTA
+    return std::bit_cast<float>(sign | (static_cast<std::uint32_t>(exponent + BIAS_DELTA) << FLOAT_MANTISSA_BITS)
+                                | (mantissa << MANTISSA_SHIFT));
 }
 
 auto WaterSkirt::rotationColumn(const RE::NiMatrix3& rot,
@@ -73,16 +102,21 @@ void WaterSkirt::buildFrustumPlanes(const RE::NiCamera* camera,
     };
 
     // Near and far planes are perpendicular to the view direction in both projections
-    planes[0] = planeThrough(dir, pos + (dir * frustum.fNear));
-    planes[1] = planeThrough(-dir, pos + (dir * frustum.fFar));
+    const FrustumPlane nearPlane = planeThrough(dir, pos + (dir * frustum.fNear));
+    const FrustumPlane farPlane = planeThrough(-dir, pos + (dir * frustum.fFar));
 
     // Orthographic: the side planes are parallel to the view direction, offset
-    // by the frustum extents along the right/up axes
+    // by the frustum extents along the right/up axes. Assigned as a whole array
+    // in near, far, left, right, top, bottom order.
     if (frustum.bOrtho) {
-        planes[2] = planeThrough(right, pos + (right * frustum.fLeft));
-        planes[3] = planeThrough(-right, pos + (right * frustum.fRight));
-        planes[4] = planeThrough(-up, pos + (up * frustum.fTop));
-        planes[5] = planeThrough(up, pos + (up * frustum.fBottom)); // NOLINT(cppcoreguidelines-avoid-magic-numbers)
+        planes = FrustumPlanes {
+            nearPlane,
+            farPlane,
+            planeThrough(right, pos + (right * frustum.fLeft)),
+            planeThrough(-right, pos + (right * frustum.fRight)),
+            planeThrough(-up, pos + (up * frustum.fTop)),
+            planeThrough(up, pos + (up * frustum.fBottom)),
+        };
         return;
     }
 
@@ -94,10 +128,14 @@ void WaterSkirt::buildFrustumPlanes(const RE::NiCamera* camera,
         const RE::NiPoint3 normal = ((axis * sign) - (dir * (sign * slope))) * k;
         return FrustumPlane {.normal = normal, .d = normal.Dot(pos)};
     };
-    planes[2] = slopePlane(right, frustum.fLeft, 1.0F);
-    planes[3] = slopePlane(right, frustum.fRight, -1.0F);
-    planes[4] = slopePlane(up, frustum.fTop, -1.0F);
-    planes[5] = slopePlane(up, frustum.fBottom, 1.0F); // NOLINT(cppcoreguidelines-avoid-magic-numbers)
+    planes = FrustumPlanes {
+        nearPlane,
+        farPlane,
+        slopePlane(right, frustum.fLeft, 1.0F),
+        slopePlane(right, frustum.fRight, -1.0F),
+        slopePlane(up, frustum.fTop, -1.0F),
+        slopePlane(up, frustum.fBottom, 1.0F),
+    };
 }
 
 auto WaterSkirt::boundInFrustum(const RE::NiBound& bound,
@@ -160,8 +198,8 @@ void WaterSkirt::searchTemplateQuad(RE::NiAVObject* objPtr,
             // Unmeasurable meshes are trusted only with the exact topology of an
             // engine-built water quad (see DonorVerdict)
             const bool trustedUnverifiable = vertexCount == 4 && shape->triangleCount == 2;
-            if (check.verdict == DonorVerdict::kNotSolidWater
-                || (check.verdict == DonorVerdict::kUnverifiable && !trustedUnverifiable)) {
+            if (check.verdict == DonorVerdict::K_NOT_SOLID_WATER
+                || (check.verdict == DonorVerdict::K_UNVERIFIABLE && !trustedUnverifiable)) {
                 ++search.rejectedCount;
                 return;
             }
@@ -226,7 +264,7 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
     // loaded from disk, but not for everything
     auto* const data = shape->rendererData;
     if ((data == nullptr) || (data->rawVertexData == nullptr) || (data->rawIndexData == nullptr)) {
-        return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "no CPU copy"};
+        return DonorCheck {.verdict = DonorVerdict::K_UNVERIFIABLE, .detail = "no CPU copy"};
     }
 
     // Dynamic tri shapes keep their rendered positions in per-frame dynamic data, not
@@ -236,7 +274,7 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
     // through the engine-quad topology gate).
     if (shape->type == RE::BSGeometry::Type::kDynamicTriShape
         || shape->type == RE::BSGeometry::Type::kParticleShaderDynamicTriShape) {
-        return DonorCheck {.verdict = DonorVerdict::kNotSolidWater, .detail = "dynamic tri shape"};
+        return DonorCheck {.verdict = DonorVerdict::K_NOT_SOLID_WATER, .detail = "dynamic tri shape"};
     }
 
     // Vertex stride: the low nibble of the descriptor is the size in dwords (the engine's
@@ -250,30 +288,35 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
     constexpr std::uint64_t K_BARE_FLOAT4_DESC = 0x0000100000000004ULL;
     const auto descBits = std::bit_cast<std::uint64_t>(data->vertexDesc);
     const std::size_t stride = (descBits & 0xFU) * 4;
-    const bool floatPositions = data->vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC)
-        || descBits == K_BARE_FLOAT4_DESC;
+    const bool floatPositions
+        = data->vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC) || descBits == K_BARE_FLOAT4_DESC;
     const std::size_t positionSize = floatPositions ? 3 * sizeof(float) : 3 * sizeof(std::uint16_t);
     const std::uint32_t vertexCount = shape->vertexCount;
     const std::uint32_t triangleCount = shape->triangleCount;
     constexpr std::size_t MAX_STRIDE = 64;
     if (vertexCount == 0 || triangleCount == 0 || stride < positionSize || stride > MAX_STRIDE) {
-        return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "unexpected vertex layout"};
+        return DonorCheck {.verdict = DonorVerdict::K_UNVERIFIABLE, .detail = "unexpected vertex layout"};
     }
 
     // Decode every vertex position, tracking the model-space extents
     std::vector<RE::NiPoint3> positions;
     positions.reserve(vertexCount);
-    RE::NiPoint3 minPos {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
-    RE::NiPoint3 maxPos {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest()};
+    RE::NiPoint3 minPos {
+        std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max()};
+    RE::NiPoint3 maxPos {std::numeric_limits<float>::lowest(),
+                         std::numeric_limits<float>::lowest(),
+                         std::numeric_limits<float>::lowest()};
+    const std::span<const std::uint8_t> vertexData {data->rawVertexData,
+                                                    static_cast<std::size_t>(vertexCount) * stride};
     for (std::uint32_t i = 0; i < vertexCount; ++i) {
-        const std::uint8_t* const vertex = data->rawVertexData + (static_cast<std::size_t>(i) * stride);
+        const std::uint8_t* const vertex = vertexData.subspan(static_cast<std::size_t>(i) * stride).data();
         RE::NiPoint3 pos;
         if (floatPositions) {
             std::memcpy(&pos.x, vertex, 3 * sizeof(float));
         } else {
             std::array<std::uint16_t, 3> halves {};
             std::memcpy(halves.data(), vertex, sizeof(halves));
-            pos = RE::NiPoint3 {halfToFloat(halves[0]), halfToFloat(halves[1]), halfToFloat(halves[2])};
+            pos = RE::NiPoint3 {halfToFloat(halves.at(0)), halfToFloat(halves.at(1)), halfToFloat(halves.at(2))};
         }
         minPos.x = std::min(minPos.x, pos.x);
         minPos.y = std::min(minPos.y, pos.y);
@@ -287,17 +330,24 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
     // Sum the triangle areas projected on XY. For a gap-free sheet the total matches the
     // extents rectangle; holes and slivers fall short of it.
     double area2 = 0.0; // twice the summed area
+    const std::span<const std::uint16_t> indices {data->rawIndexData, static_cast<std::size_t>(triangleCount) * 3};
     for (std::uint32_t t = 0; t < triangleCount; ++t) {
-        const std::uint16_t idx0 = data->rawIndexData[(3 * t) + 0];
-        const std::uint16_t idx1 = data->rawIndexData[(3 * t) + 1];
-        const std::uint16_t idx2 = data->rawIndexData[(3 * t) + 2];
+        // Copy the triangle's three indices into an array (std::span has no
+        // bounds-checked accessor here); subspan carries the bounds knowledge
+        std::array<std::uint16_t, 3> triangle {};
+        std::memcpy(triangle.data(),
+                    indices.subspan(static_cast<std::size_t>(t) * 3, triangle.size()).data(),
+                    sizeof(triangle));
+        const std::uint16_t idx0 = triangle.at(0);
+        const std::uint16_t idx1 = triangle.at(1);
+        const std::uint16_t idx2 = triangle.at(2);
         if (idx0 >= vertexCount || idx1 >= vertexCount || idx2 >= vertexCount) {
             // not the index data this mesh renders with
-            return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "corrupt index data"};
+            return DonorCheck {.verdict = DonorVerdict::K_UNVERIFIABLE, .detail = "corrupt index data"};
         }
-        const auto& p0 = positions[idx0];
-        const auto& p1 = positions[idx1];
-        const auto& p2 = positions[idx2];
+        const auto& p0 = positions.at(idx0);
+        const auto& p1 = positions.at(idx1);
+        const auto& p2 = positions.at(idx2);
         area2 += std::abs((static_cast<double>(p1.x - p0.x) * static_cast<double>(p2.y - p0.y))
                           - (static_cast<double>(p1.y - p0.y) * static_cast<double>(p2.x - p0.x)));
     }
@@ -315,11 +365,10 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
     // measure properly. The gate remains for meshes whose CPU copy is genuinely stale.)
     const float decodedHalfDiagonal = 0.5F * std::hypot(extentX, extentY);
     const float modelRadius = shape->modelBound.radius;
-    const bool decodeConsistent = modelRadius > 0.0F
-        && decodedHalfDiagonal >= 0.5F * modelRadius
-        && decodedHalfDiagonal <= 2.0F * modelRadius;
+    const bool decodeConsistent
+        = modelRadius > 0.0F && decodedHalfDiagonal >= 0.5F * modelRadius && decodedHalfDiagonal <= 2.0F * modelRadius;
     if (!decodeConsistent) {
-        return DonorCheck {.verdict = DonorVerdict::kUnverifiable, .detail = "CPU copy inconsistent with bound"};
+        return DonorCheck {.verdict = DonorVerdict::K_UNVERIFIABLE, .detail = "CPU copy inconsistent with bound"};
     }
 
     // Solid water: one flat, gap-free, square sheet
@@ -328,9 +377,9 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
     const bool flat = (maxPos.z - minPos.z) <= std::max(1.0F, 0.001F * maxExtent);
     const bool solid = maxExtent > 1.0F && flat && squareness >= MIN_SQUARENESS && coverage >= MIN_COVERAGE;
     if (solid) {
-        return DonorCheck {.verdict = DonorVerdict::kSolidWater, .detail = "measured solid"};
+        return DonorCheck {.verdict = DonorVerdict::K_SOLID_WATER, .detail = "measured solid"};
     }
-    return DonorCheck {.verdict = DonorVerdict::kNotSolidWater, .detail = "measured not solid"};
+    return DonorCheck {.verdict = DonorVerdict::K_NOT_SOLID_WATER, .detail = "measured not solid"};
 }
 
 void WaterSkirt::updateVisibility()
@@ -371,11 +420,11 @@ void WaterSkirt::updateVisibility()
 
     const std::size_t count = std::min(s_tiles.size(), s_layout.size());
     for (std::size_t i = 0; i < count; ++i) {
-        const auto& tile = s_tiles[i];
+        const auto& tile = s_tiles.at(i);
         if (!tile) {
             continue;
         }
-        const auto& rel = s_layout[i];
+        const auto& rel = s_layout.at(i);
 
         // True tile bound; the radius (half-diagonal is size * 0.71) carries
         // ~40% slack for the camera moving until the next update.
@@ -428,14 +477,16 @@ void WaterSkirt::refreshNearWaterCoverage(float centerX,
             for (const auto& box : waterObject->multiBounds) {
                 if (box && box->size.x > 0.0F && box->size.y > 0.0F) {
                     hasBox = true;
-                    s_nearWater.footprints.push_back(
-                        WaterFootprint {box->center.x, box->center.y, box->size.x, box->size.y});
+                    s_nearWater.footprints.push_back(WaterFootprint {
+                        .x = box->center.x, .y = box->center.y, .halfX = box->size.x, .halfY = box->size.y});
                 }
             }
             if (!hasBox && waterObject->shape && waterObject->shape->worldBound.radius > 0.0F) {
                 const auto& waterBound = waterObject->shape->worldBound;
-                s_nearWater.footprints.push_back(
-                    WaterFootprint {waterBound.center.x, waterBound.center.y, waterBound.radius, waterBound.radius});
+                s_nearWater.footprints.push_back(WaterFootprint {.x = waterBound.center.x,
+                                                                 .y = waterBound.center.y,
+                                                                 .halfX = waterBound.radius,
+                                                                 .halfY = waterBound.radius});
             }
         }
     }
@@ -448,16 +499,22 @@ void WaterSkirt::refreshNearWaterCoverage(float centerX,
     const float coverOriginX = centerX - (1.5F * K_TILE_SIZE);
     const float coverOriginY = centerY - (1.5F * K_TILE_SIZE);
     for (const auto& footprint : s_nearWater.footprints) {
-        const int firstX = std::max(
-            0, static_cast<int>(std::ceil(((footprint.x - footprint.halfX - coverOriginX) / K_COVERAGE_CELL) - K_COVERAGE_EPSILON)));
-        const int endX = std::min(
-            K_COVERAGE_GRID,
-            static_cast<int>(std::floor(((footprint.x + footprint.halfX - coverOriginX) / K_COVERAGE_CELL) + K_COVERAGE_EPSILON)));
-        const int firstY = std::max(
-            0, static_cast<int>(std::ceil(((footprint.y - footprint.halfY - coverOriginY) / K_COVERAGE_CELL) - K_COVERAGE_EPSILON)));
-        const int endY = std::min(
-            K_COVERAGE_GRID,
-            static_cast<int>(std::floor(((footprint.y + footprint.halfY - coverOriginY) / K_COVERAGE_CELL) + K_COVERAGE_EPSILON)));
+        const int firstX
+            = std::max(0,
+                       static_cast<int>(std::ceil(((footprint.x - footprint.halfX - coverOriginX) / K_COVERAGE_CELL)
+                                                  - K_COVERAGE_EPSILON)));
+        const int endX
+            = std::min(K_COVERAGE_GRID,
+                       static_cast<int>(std::floor(((footprint.x + footprint.halfX - coverOriginX) / K_COVERAGE_CELL)
+                                                   + K_COVERAGE_EPSILON)));
+        const int firstY
+            = std::max(0,
+                       static_cast<int>(std::ceil(((footprint.y - footprint.halfY - coverOriginY) / K_COVERAGE_CELL)
+                                                  - K_COVERAGE_EPSILON)));
+        const int endY
+            = std::min(K_COVERAGE_GRID,
+                       static_cast<int>(std::floor(((footprint.y + footprint.halfY - coverOriginY) / K_COVERAGE_CELL)
+                                                   + K_COVERAGE_EPSILON)));
         for (int cellX = firstX; cellX < endX; ++cellX) {
             for (int cellY = firstY; cellY < endY; ++cellY) {
                 s_nearWater.covered.at(cellX).at(cellY) = true;
@@ -486,8 +543,8 @@ void WaterSkirt::refreshNearWaterCoverage(float centerX,
 
 auto WaterSkirt::isHiddenByNearWater(const RelTile& rel) -> bool
 {
-    const bool nearFullTile = rel.size == K_TILE_SIZE
-        && std::fabs(rel.dx) <= K_TILE_SIZE && std::fabs(rel.dy) <= K_TILE_SIZE;
+    const bool nearFullTile
+        = rel.size == K_TILE_SIZE && std::fabs(rel.dx) <= K_TILE_SIZE && std::fabs(rel.dy) <= K_TILE_SIZE;
     if (!nearFullTile && rel.size != K_NEAR_SUBTILE_SIZE) {
         return false;
     }
@@ -633,12 +690,11 @@ void WaterSkirt::buildLayout()
                 for (int sx = 0; sx < DIVISIONS; ++sx) {
                     for (int sy = 0; sy < DIVISIONS; ++sy) {
                         const float offset = (static_cast<float>(DIVISIONS) - 1.0F) * 0.5F;
-                        s_layout.push_back(RelTile {
-                            .dx = (static_cast<float>(ix) * K_TILE_SIZE)
-                                + ((static_cast<float>(sx) - offset) * K_NEAR_SUBTILE_SIZE),
-                            .dy = (static_cast<float>(iy) * K_TILE_SIZE)
-                                + ((static_cast<float>(sy) - offset) * K_NEAR_SUBTILE_SIZE),
-                            .size = K_NEAR_SUBTILE_SIZE});
+                        s_layout.push_back(RelTile {.dx = (static_cast<float>(ix) * K_TILE_SIZE)
+                                                        + ((static_cast<float>(sx) - offset) * K_NEAR_SUBTILE_SIZE),
+                                                    .dy = (static_cast<float>(iy) * K_TILE_SIZE)
+                                                        + ((static_cast<float>(sy) - offset) * K_NEAR_SUBTILE_SIZE),
+                                                    .size = K_NEAR_SUBTILE_SIZE});
                     }
                 }
                 continue;
@@ -663,11 +719,11 @@ void WaterSkirt::placeTiles(int centerBx,
     RE::NiUpdateData updateData {};
     const std::size_t count = std::min(s_tiles.size(), s_layout.size());
     for (std::size_t i = 0; i < count; ++i) {
-        const auto& tile = s_tiles[i];
+        const auto& tile = s_tiles.at(i);
         if (!tile) {
             continue;
         }
-        const auto& rel = s_layout[i];
+        const auto& rel = s_layout.at(i);
 
         // Scale the template to the tile's edge length, then translate so the
         // template's model-space center lands on the tile's world position
@@ -764,7 +820,8 @@ void WaterSkirt::updateSkirt()
         // No LOD water attached yet (or the worldspace has none to clone);
         // retried on the next cell attach event.
         if (search.rejectedCount > 0) {
-            spdlog::info("Water skirt: no usable donor yet ({} candidates rejected: not verifiably solid water); waiting for the next cell attach",
+            spdlog::info("Water skirt: no usable donor yet ({} candidates rejected: not verifiably solid water); "
+                         "waiting for the next cell attach",
                          search.rejectedCount);
         }
         return;
@@ -851,7 +908,8 @@ void WaterSkirt::updateSkirt()
                  worldSpace->flags.underlying(),
                  s_skirtHeight,
                  search.bestVertexCount,
-                 search.bestCheck.verdict == DonorVerdict::kSolidWater ? "verified solid water" : "trusted engine quad",
+                 search.bestCheck.verdict == DonorVerdict::K_SOLID_WATER ? "verified solid water"
+                                                                         : "trusted engine quad",
                  search.bestCheck.detail,
                  search.rejectedCount);
 }

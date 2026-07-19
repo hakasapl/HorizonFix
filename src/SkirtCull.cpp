@@ -2,6 +2,12 @@
 
 #include "WaterSkirt.hpp"
 
+#include "PCH.h"
+
+#include <spdlog/spdlog.h>
+
+#include <cstdint>
+
 using namespace HorizonFix::SkirtCull;
 
 void AtmosphereUpdateHook::thunk(RE::Atmosphere* atmospherePtr,
@@ -20,7 +26,7 @@ void AtmosphereUpdateHook::install()
 {
     // Overwrite the Update slot in the Atmosphere vtable; the engine calls it once per frame,
     // and the thunk chains to the saved original so vanilla behavior is preserved
-    REL::Relocation<std::uintptr_t> vtbl {RE::VTABLE_Atmosphere[0]};
+    REL::Relocation<std::uintptr_t> vtbl {RE::VTABLE_Atmosphere.at(0)};
     s_func = vtbl.write_vfunc(K_INDEX, thunk);
 
     spdlog::info("Hooked Atmosphere::Update (vtable {:#x}, original {:#x})", vtbl.address(), s_func.address());

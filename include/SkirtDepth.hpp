@@ -1,5 +1,11 @@
 #pragma once
 
+#include "PCH.h"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+
 namespace HorizonFix {
 
 /**
@@ -20,7 +26,8 @@ private:
     // Constants
     //
     static constexpr std::uint32_t K_MAX_VIEWPORTS = 16; // D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE
-    static constexpr std::size_t K_NOCLIP_CACHE_SIZE = 8; /**< Max distinct rasterizer states to keep no-clip copies of */
+    static constexpr std::size_t K_NOCLIP_CACHE_SIZE
+        = 8; /**< Max distinct rasterizer states to keep no-clip copies of */
 
     // Depth that beyond-far-plane fragments clamp to: eight quanta of a 24-bit
     // depth buffer below the far plane. Strictly closer than the 1.0 clear value
@@ -44,7 +51,8 @@ private:
     static constexpr std::int32_t K_SKIRT_DEPTH_BIAS = 256;
 
     // State between a Setup/Restore pair; water passes render on a single thread.
-    static inline std::array<REX::W32::D3D11_VIEWPORT, K_MAX_VIEWPORTS> s_savedViewports {}; /**< Viewports bound before Setup adjusted them */
+    static inline std::array<REX::W32::D3D11_VIEWPORT, K_MAX_VIEWPORTS>
+        s_savedViewports {}; /**< Viewports bound before Setup adjusted them */
     static inline std::uint32_t s_savedCount = 0; /**< How many viewports were saved */
     static inline REX::W32::D3D11_VIEWPORT s_adjustedViewport {}; // what Setup bound
     static inline REX::W32::ID3D11RasterizerState* s_savedRasterState = nullptr; // ref held via RSGetState
