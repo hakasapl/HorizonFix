@@ -8,16 +8,12 @@ endif()
 
 # One source tree, two runtime flavors: configure with -DSKYRIM_SUPPORT_AE=ON
 # (default) for AE 1.6.x, or OFF for SE 1.5.97. CommonLibSSE selects address
-# library IDs and struct layouts from the same flag at compile time. The two
-# flavors get distinct plugin/log/DLL names so they can coexist; a runtime
-# version guard in main.cpp makes a wrong-flavor DLL exit cleanly.
+# library IDs and struct layouts from the same flag at compile time. Both
+# flavors ship as HorizonFix.dll and are distributed in separate se/ae folders;
+# a runtime version guard in main.cpp makes a wrong-flavor DLL exit cleanly.
 option(SKYRIM_SUPPORT_AE "Build for Skyrim AE (1.6.x); OFF builds for SE (1.5.97)" ON)
 
-if(SKYRIM_SUPPORT_AE)
-    set(PLUGIN_NAME "HorizonFix")
-else()
-    set(PLUGIN_NAME "HorizonFixSE")
-endif()
+set(PLUGIN_NAME "HorizonFix")
 set(PLUGIN_VERSION "0.3.3")
 project(${PLUGIN_NAME} VERSION ${PLUGIN_VERSION} LANGUAGES CXX)
 

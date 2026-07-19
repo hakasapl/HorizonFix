@@ -6,11 +6,13 @@
 
 .DESCRIPTION
     Produces two flavors from the one source tree (see CMakeLists.txt):
-      - AE: SKYRIM_SUPPORT_AE=ON  -> HorizonFix.dll   -> dist/ae/
-      - SE: SKYRIM_SUPPORT_AE=OFF -> HorizonFixSE.dll  -> dist/se/
+      - AE: SKYRIM_SUPPORT_AE=ON  -> dist/ae/
+      - SE: SKYRIM_SUPPORT_AE=OFF -> dist/se/
 
-    For each flavor the built DLL and PDB, plus everything in the package/
-    folder, are copied into the matching dist subfolder.
+    Both flavors build the same file names (HorizonFix.dll/.pdb); each variant
+    is built in its own build directory and staged only from there, so the two
+    never mix. For each flavor the built DLL and PDB, plus everything in the
+    package/ folder, are copied into the matching dist subfolder.
 
 .PARAMETER Config
     CMake build configuration. Defaults to RelWithDebInfo.
@@ -33,10 +35,11 @@ $BuildRoot = Join-Path $RepoRoot "buildRel"
 $DistRoot = Join-Path $RepoRoot "dist"
 $PackageDir = Join-Path $RepoRoot "package"
 
-# variant name, CMake flag value, resulting plugin/DLL base name
+# variant name, CMake flag value, plugin/DLL base name (identical for both;
+# the variants are separated by their dist subfolders, not by file name)
 $Variants = @(
     [pscustomobject]@{ Name = "ae"; SupportAE = "ON"; Plugin = "HorizonFix" }
-    [pscustomobject]@{ Name = "se"; SupportAE = "OFF"; Plugin = "HorizonFixSE" }
+    [pscustomobject]@{ Name = "se"; SupportAE = "OFF"; Plugin = "HorizonFix" }
 )
 
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
