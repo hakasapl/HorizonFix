@@ -786,43 +786,11 @@ void WaterSkirt::updateSkirt()
 
     // The tiles sit exactly at the LOD water height (from whichever worldspace
     // owns the LOD data); coplanarity with the game's real water is handled by
-    // the near-water yielding and the skirt depth bias, not by a height offset
+    // the near-water yielding and the skirt depth bias, not by a height offset.
+    // Small Worlds are skipped by default (see above), and allowlisted ones are
+    // expected to define a proper LOD water height of their own.
     auto* const lodWorldSpace = getLODWorldSpace(worldSpace);
-    float waterHeight = lodWorldSpace->lodWaterHeight;
-
-    // NAM4 is only meaningful where the engine actually renders LOD water. Pocket
-    // worldspaces (Small World flag) and worlds without a LOD water form never do -
-    // yet they often carry a CK-default NAM3 and an absent NAM4 that reads 0, which
-    // floats the skirt into the sky of worlds built below z=0 (field-observed in
-    // Fort Dawnguard's canyon). The water the engine is actually rendering is the
-    // trustworthy height there: use the nearest live water object, or build
-    // nothing if there is none yet.
-    if (lodWorldSpace->lodWater == nullptr || worldSpace->flags.any(RE::TESWorldSpace::Flag::kSmallWorld)) {
-        bool found = false;
-        float nearestDistSq = std::numeric_limits<float>::max();
-        if (auto* const waterSystem = RE::TESWaterSystem::GetSingleton()) {
-            const RE::BSSpinLockGuard locker(waterSystem->lock);
-            for (const auto& waterObject : waterSystem->waterObjects) {
-                if (!waterObject || !waterObject->shape || waterObject->shape->worldBound.radius <= 0.0F) {
-                    continue;
-                }
-                const auto& waterBound = waterObject->shape->worldBound;
-                const float deltaX = waterBound.center.x - playerPos.x;
-                const float deltaY = waterBound.center.y - playerPos.y;
-                const float distSq = (deltaX * deltaX) + (deltaY * deltaY);
-                if (distSq < nearestDistSq) {
-                    nearestDistSq = distSq;
-                    waterHeight = waterBound.center.z;
-                    found = true;
-                }
-            }
-        }
-        if (!found) {
-            return; // no water to match yet; retried on the next cell attach
-        }
-    }
-
-    s_skirtHeight = waterHeight;
+    s_skirtHeight = lodWorldSpace->lodWaterHeight;
 
     // Compute the disc of tile positions/sizes around the player's block
     buildLayout();
