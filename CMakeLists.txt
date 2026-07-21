@@ -14,7 +14,7 @@ endif()
 option(SKYRIM_SUPPORT_AE "Build for Skyrim AE (1.6.x); OFF builds for SE (1.5.97)" ON)
 
 set(PLUGIN_NAME "HorizonFix")
-set(PLUGIN_VERSION "0.4.0")
+set(PLUGIN_VERSION "0.4.1")
 project(${PLUGIN_NAME} VERSION ${PLUGIN_VERSION} LANGUAGES CXX)
 
 if(MSVC)
