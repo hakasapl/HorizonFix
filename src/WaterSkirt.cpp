@@ -239,12 +239,15 @@ void WaterSkirt::removeSkirt()
         s_skirtRoot.reset();
     }
 
-    // Reset all cached state; the sentinel center forces a full rebuild next time
+    // Reset all cached state; the sentinel center forces a full rebuild next time.
+    // The map coverage cache goes too: its worldspace pointer would otherwise dangle,
+    // and a new worldspace allocated at the same address could match it by accident.
     s_tiles.clear();
     s_layout.clear();
     s_skirtWorldSpace = nullptr;
     s_centerBx = std::numeric_limits<int>::max();
     s_centerBy = std::numeric_limits<int>::max();
+    s_nearMap = NearMapCoverage {};
 }
 
 auto WaterSkirt::cloneTemplate(RE::BSTriShape* templatePtr) -> RE::NiPointer<RE::BSGeometry>
@@ -415,7 +418,9 @@ void WaterSkirt::updateVisibility()
     // (multithreaded pass accumulation) and flickers from any angle. Whatever hides
     // a piece of skirt is water rendering those pixels, so hiding cannot open a
     // hole - and in worldspaces without water coverage (the small-map void case)
-    // nothing overlaps, so everything fills.
+    // nothing overlaps, so everything fills. Near tiles additionally yield wherever
+    // the map defines cells at all (s_nearMap, refreshed by updateSkirt): the game's
+    // own terrain and LOD own those pixels, so the skirt only fills true void.
     refreshNearWaterCoverage(centerX, centerY);
 
     const std::size_t count = std::min(s_tiles.size(), s_layout.size());
@@ -432,8 +437,8 @@ void WaterSkirt::updateVisibility()
         bound.center = RE::NiPoint3 {centerX + rel.dx, centerY + rel.dy, s_skirtHeight};
         bound.radius = rel.size;
 
-        // Near-block representation choice (see buildLayout and isHiddenByNearWater)
-        const bool hiddenByWater = isHiddenByNearWater(rel);
+        // Near-block representation choice (see buildLayout and isHiddenByNearCoverage)
+        const bool hiddenByCoverage = isHiddenByNearCoverage(rel);
 
         // Every tile lies past the far plane, so testing the true bound would fail
         // the far-plane check for all of them. Project the bound toward the camera
@@ -449,7 +454,7 @@ void WaterSkirt::updateVisibility()
 
         // Only touch the cull flag when the state actually changes, to avoid
         // needless scene-graph dirtying
-        const bool visible = !hiddenByWater && boundInFrustum(bound, planes);
+        const bool visible = !hiddenByCoverage && boundInFrustum(bound, planes);
         if (tile->flags.any(RE::NiAVObject::Flag::kHidden) == visible) {
             tile->SetAppCulled(!visible);
         }
@@ -541,7 +546,153 @@ void WaterSkirt::refreshNearWaterCoverage(float centerX,
     }
 }
 
-auto WaterSkirt::isHiddenByNearWater(const RelTile& rel) -> bool
+void WaterSkirt::refreshNearMapCoverage()
+{
+    // Static per (worldspace, center block): the common call is a no-op
+    if (s_nearMap.worldSpace == s_skirtWorldSpace && s_nearMap.centerBx == s_centerBx
+        && s_nearMap.centerBy == s_centerBy) {
+        return;
+    }
+    s_nearMap.worldSpace = s_skirtWorldSpace;
+    s_nearMap.centerBx = s_centerBx;
+    s_nearMap.centerBy = s_centerBy;
+    for (auto& row : s_nearMap.covered) {
+        row.fill(false);
+    }
+    s_nearMap.blockHasMap = {};
+    if (s_skirtWorldSpace == nullptr) {
+        return;
+    }
+
+    // The cells that render here belong to whichever worldspace owns the land
+    // data; the engine's own land lookup delegates wholesale to the parent when
+    // kUseLandData is set, so walk the same way
+    auto* worldSpacePtr = s_skirtWorldSpace;
+    while ((worldSpacePtr->parentWorld != nullptr)
+           && worldSpacePtr->parentUseFlags.any(RE::TESWorldSpace::ParentUseFlag::kUseLandData)) {
+        worldSpacePtr = worldSpacePtr->parentWorld;
+    }
+
+    // Cell coordinates of the near zone's lower-left corner: the 3x3 near blocks
+    // start one whole block before the center block (all block-aligned, so the
+    // grid maps to whole cells exactly)
+    const int originCellX = (s_centerBx - 1) * K_CELLS_PER_BLOCK;
+    const int originCellY = (s_centerBy - 1) * K_CELLS_PER_BLOCK;
+
+    // Pass 1: master files' OFST tables. The loader never registers exterior
+    // cells of master-flagged files up front, so cellMap says nothing about
+    // unvisited ESM cells; their existence lives in these tables (a nonzero
+    // offset at the cell's index - the engine's own lazy-load test).
+    if (const auto* const files = worldSpacePtr->sourceFiles.array) {
+        // CommonLib does not name this member yet: unk1D0 is the engine's
+        // BSTHashMap<TESFile*, OFST data> (see WorldCellOffsetData)
+        const auto& offsetDataMap = worldSpacePtr->unk1D0;
+        for (const RE::TESFile* file : *files) {
+            // The engine consults OFST only for master-flagged files; everything
+            // else had its cells parsed (and put in cellMap) at load
+            if ((file == nullptr) || file->recordFlags.none(RE::TESFile::RecordFlag::kMaster)) {
+                continue;
+            }
+
+            // The table is keyed by the end of the threadSafeParent chain (the
+            // canonical file object shared by all per-thread clones)
+            const RE::TESFile* canonical = file;
+            while (canonical->threadSafeParent != nullptr) {
+                canonical = canonical->threadSafeParent;
+            }
+            const auto iter = offsetDataMap.find(reinterpret_cast<RE::UnkKey>(canonical));
+            if (iter == offsetDataMap.end()) {
+                continue;
+            }
+            const auto* const offsetData = reinterpret_cast<const WorldCellOffsetData*>(iter->second);
+            if ((offsetData == nullptr) || (offsetData->fileOffsets == nullptr)) {
+                continue;
+            }
+
+            // Extents are world units; floor then arithmetic-shift to cell coords
+            const auto toCell
+                = [](float worldUnits) -> int { return static_cast<int>(std::floor(worldUnits)) >> K_CELL_SHIFT; };
+            const int minCellX = toCell(offsetData->minX);
+            const int minCellY = toCell(offsetData->minY);
+            const int maxCellX = toCell(offsetData->maxX);
+            const int maxCellY = toCell(offsetData->maxY);
+            const int width = maxCellX - minCellX + 1;
+            const int height = maxCellY - minCellY + 1;
+            if (width <= 0 || height <= 0) {
+                continue;
+            }
+            const std::span<const std::uint32_t> offsets {
+                offsetData->fileOffsets, static_cast<std::size_t>(width) * static_cast<std::size_t>(height)};
+
+            // Mark the intersection of this file's rectangle with the near zone
+            const int firstX = std::max(originCellX, minCellX);
+            const int lastX = std::min(originCellX + K_COVERAGE_GRID - 1, maxCellX);
+            const int firstY = std::max(originCellY, minCellY);
+            const int lastY = std::min(originCellY + K_COVERAGE_GRID - 1, maxCellY);
+            if (firstX > lastX || firstY > lastY) {
+                continue; // the file's rectangle misses the near zone entirely
+            }
+            // Read one row of the table at a time; subspan carries the bounds
+            // knowledge (std::span has no bounds-checked accessor)
+            for (int cellY = firstY; cellY <= lastY; ++cellY) {
+                const std::size_t rowStart
+                    = (static_cast<std::size_t>(cellY - minCellY) * static_cast<std::size_t>(width))
+                    + static_cast<std::size_t>(firstX - minCellX);
+                int cellX = firstX;
+                for (const std::uint32_t recordOffset :
+                     offsets.subspan(rowStart, static_cast<std::size_t>(lastX - firstX) + 1)) {
+                    if (recordOffset != 0) {
+                        s_nearMap.covered.at(cellX - originCellX).at(cellY - originCellY) = true;
+                    }
+                    ++cellX;
+                }
+            }
+        }
+    }
+
+    // Pass 2: cellMap, for everything the tables cannot see - non-master plugins
+    // (all their exterior cells are registered at load) and cells the engine has
+    // already materialized. Only cells still unmarked need the lookup.
+    const auto& cellMap = worldSpacePtr->cellMap;
+    for (int gridX = 0; gridX < K_COVERAGE_GRID; ++gridX) {
+        for (int gridY = 0; gridY < K_COVERAGE_GRID; ++gridY) {
+            if (s_nearMap.covered.at(gridX).at(gridY)) {
+                continue;
+            }
+            const RE::CellID cellID {static_cast<std::int16_t>(originCellY + gridY),
+                                     static_cast<std::int16_t>(originCellX + gridX)};
+            if (cellMap.contains(cellID)) {
+                s_nearMap.covered.at(gridX).at(gridY) = true;
+            }
+        }
+    }
+
+    // Which of the 3x3 near blocks contain any map cell (picks their representation)
+    std::size_t coveredCount = 0;
+    for (int blockX = 0; blockX < 3; ++blockX) {
+        for (int blockY = 0; blockY < 3; ++blockY) {
+            bool hasMap = false;
+            for (int cellX = blockX * K_CELLS_PER_BLOCK; cellX < (blockX + 1) * K_CELLS_PER_BLOCK; ++cellX) {
+                for (int cellY = blockY * K_CELLS_PER_BLOCK; cellY < (blockY + 1) * K_CELLS_PER_BLOCK; ++cellY) {
+                    if (s_nearMap.covered.at(cellX).at(cellY)) {
+                        hasMap = true;
+                        ++coveredCount;
+                    }
+                }
+            }
+            s_nearMap.blockHasMap.at(blockX).at(blockY) = hasMap;
+        }
+    }
+
+    spdlog::info("Water skirt map coverage for {} block ({}, {}): {}/{} near cells defined",
+                 s_skirtWorldSpace->GetFormEditorID(),
+                 s_centerBx,
+                 s_centerBy,
+                 coveredCount,
+                 static_cast<std::size_t>(K_COVERAGE_GRID) * K_COVERAGE_GRID);
+}
+
+auto WaterSkirt::isHiddenByNearCoverage(const RelTile& rel) -> bool
 {
     const bool nearFullTile
         = rel.size == K_TILE_SIZE && std::fabs(rel.dx) <= K_TILE_SIZE && std::fabs(rel.dy) <= K_TILE_SIZE;
@@ -557,28 +708,36 @@ auto WaterSkirt::isHiddenByNearWater(const RelTile& rel) -> bool
         return false;
     }
 
-    const bool blockHasWater = s_nearWater.blockHasWater.at(blockX + 1).at(blockY + 1);
+    // A block with any content - live water or defined map cells - is represented
+    // by its subtiles so exactly the covered pieces can be hidden; only a block of
+    // pure void keeps its single full tile
+    const bool blockCovered = s_nearWater.blockHasWater.at(blockX + 1).at(blockY + 1)
+        || s_nearMap.blockHasMap.at(blockX + 1).at(blockY + 1);
     if (nearFullTile) {
-        return blockHasWater; // the subtiles represent a water-touched block
+        return blockCovered;
     }
-    if (!blockHasWater) {
-        return true; // the full tile represents a water-free block
+    if (!blockCovered) {
+        return true; // the full tile represents a content-free block
     }
 
-    // Hide only subtiles FULLY inside the water union. Edge-straddling subtiles
-    // keep drawing through the boundary - hiding them whole left a sliver of
-    // uncovered void along water edges. The overlap they create is safe: over
-    // void the water reads far depth and renders opaque (order cannot matter),
-    // and at shorelines the shallow bed is opaque and the depth bias drops skirt
-    // fragments behind it before any compositing question arises.
+    // Hide only subtiles FULLY inside covered cells (the live water union or
+    // defined map cells). Edge-straddling subtiles keep drawing through the
+    // boundary - hiding them whole left a sliver of uncovered void along water
+    // edges. The overlap they create is safe: over void the water reads far depth
+    // and renders opaque (order cannot matter), at shorelines the shallow bed is
+    // opaque and the depth bias drops skirt fragments behind it before any
+    // compositing question arises, and over map cells whatever the game renders
+    // there beats the depth-stamped skirt the same way.
     const float half = rel.size * 0.5F;
     const int firstCellX = static_cast<int>(std::lround((rel.dx - half + (1.5F * K_TILE_SIZE)) / K_COVERAGE_CELL));
     const int firstCellY = static_cast<int>(std::lround((rel.dy - half + (1.5F * K_TILE_SIZE)) / K_COVERAGE_CELL));
     constexpr int CELLS_PER_SUBTILE = static_cast<int>(K_NEAR_SUBTILE_SIZE / K_COVERAGE_CELL);
     for (int cellX = firstCellX; cellX < firstCellX + CELLS_PER_SUBTILE; ++cellX) {
         for (int cellY = firstCellY; cellY < firstCellY + CELLS_PER_SUBTILE; ++cellY) {
-            if (cellX < 0 || cellX >= K_COVERAGE_GRID || cellY < 0 || cellY >= K_COVERAGE_GRID
-                || !s_nearWater.covered.at(cellX).at(cellY)) {
+            if (cellX < 0 || cellX >= K_COVERAGE_GRID || cellY < 0 || cellY >= K_COVERAGE_GRID) {
+                return false;
+            }
+            if (!s_nearWater.covered.at(cellX).at(cellY) && !s_nearMap.covered.at(cellX).at(cellY)) {
                 return false;
             }
         }
@@ -672,16 +831,19 @@ void WaterSkirt::buildLayout()
     for (int ix = -span; ix <= span; ++ix) {
         for (int iy = -span; iy <= span; ++iy) {
             // The 3x3 blocks around the player carry two interchangeable
-            // representations: the full tile, drawn while no live water touches
-            // the block (one draw call), and an 8x8 grid of subtiles used when
-            // water overlaps the block so that exactly the overlapped pieces can
-            // be hidden. Two translucent surfaces at the same height composite by
-            // draw order, which varies per frame (multithreaded pass accumulation)
-            // and flickers; depth tricks cannot fix compositing order, so the
-            // skirt simply must not rasterize where live water renders. Hiding an
-            // overlapped subtile never opens a hole: whatever hid it is water
-            // rendering those very pixels. updateVisibility shows exactly one
-            // representation per frame.
+            // representations: the full tile, drawn while the block is entirely
+            // free of content (one draw call), and an 8x8 grid of subtiles used
+            // when live water or defined map cells overlap the block so that
+            // exactly the covered pieces can be hidden. Two translucent surfaces
+            // at the same height composite by draw order, which varies per frame
+            // (multithreaded pass accumulation) and flickers; depth tricks cannot
+            // fix compositing order, so the skirt simply must not rasterize where
+            // live water renders - and wherever the map defines cells at all, the
+            // game's own terrain and LOD content owns those pixels, so the skirt
+            // yields there too and only fills true void. Hiding a covered subtile
+            // never opens a hole: whatever content covers it is the game rendering
+            // those very pixels. updateVisibility shows exactly one representation
+            // per frame.
             if (ix >= -1 && ix <= 1 && iy >= -1 && iy <= 1) {
                 s_layout.push_back(RelTile {.dx = static_cast<float>(ix) * K_TILE_SIZE,
                                             .dy = static_cast<float>(iy) * K_TILE_SIZE,
@@ -809,6 +971,7 @@ void WaterSkirt::updateSkirt()
         placeTiles(centerBx, centerBy);
         s_centerBx = centerBx;
         s_centerBy = centerBy;
+        refreshNearMapCoverage();
         return;
     }
 
@@ -892,6 +1055,7 @@ void WaterSkirt::updateSkirt()
     placeTiles(centerBx, centerBy);
     s_centerBx = centerBx;
     s_centerBy = centerBy;
+    refreshNearMapCoverage();
 
     // If the map opened while we were building, honor the hidden state immediately
     if (s_mapMenuOpen) {

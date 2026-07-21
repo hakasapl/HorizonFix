@@ -46,13 +46,17 @@ private:
         = 1.0e9F; /**< modelBound radius large enough that the engine's frustum test always passes */
     static constexpr float K_NEAR_SUBTILE_SIZE
         = K_TILE_SIZE / 8.0F; /**< Edge length of the subtile representation of the 3x3 near blocks (16384 = 4 cells).
-                                 Each near block carries both a full tile (drawn while the block is water-free - one
-                                 draw call) and this 8x8 grid (drawn when live water touches the block, minus the
-                                 overlapped pieces); updateVisibility shows one representation per frame */
-    static constexpr float K_COVERAGE_CELL
-        = 4096.0F; /**< Cell edge of the near-zone water coverage grid (one game cell) */
+                                 Each near block carries both a full tile (drawn while the block is entirely free of
+                                 content - one draw call) and this 8x8 grid (drawn when live water or defined map
+                                 cells touch the block, minus the covered pieces); updateVisibility shows one
+                                 representation per frame */
+    static constexpr float K_COVERAGE_CELL = 4096.0F; /**< Cell edge of the near-zone coverage grids (one game cell) */
     static constexpr int K_COVERAGE_GRID = static_cast<int>(
         (3.0F * K_TILE_SIZE) / K_COVERAGE_CELL); /**< Coverage grid cells per axis over the 3x3 near blocks */
+    static constexpr int K_CELLS_PER_BLOCK
+        = static_cast<int>(K_TILE_SIZE / K_COVERAGE_CELL); /**< Game cells per LOD32 block edge (32) */
+    static constexpr int K_CELL_SHIFT
+        = 12; /**< log2 of the cell size; the engine converts world units to cell coords by flooring and shifting */
     static constexpr float K_COVERAGE_EPSILON
         = 0.01F; /**< Tolerance in cells for float noise on cell-aligned water boxes */
 
@@ -83,14 +87,55 @@ private:
     /**
      * @brief Per-frame picture of where the game's real water renders in the near zone
      *
-     * Refreshed by refreshNearWaterCoverage, consumed by isHiddenByNearWater to pick each
-     * near block's representation and to hide the skirt pieces real water covers.
+     * Refreshed by refreshNearWaterCoverage, consumed by isHiddenByNearCoverage (together
+     * with s_nearMap) to pick each near block's representation and to hide the skirt pieces
+     * real water covers.
      */
     struct NearWaterCoverage {
         std::vector<WaterFootprint> footprints; /**< Live water rectangles */
         std::array<std::array<bool, K_COVERAGE_GRID>, K_COVERAGE_GRID>
             covered {}; /**< Cells fully inside the water union */
         std::array<std::array<bool, 3>, 3> blockHasWater {}; /**< Which of the 3x3 near blocks touch any water */
+    };
+
+    /**
+     * @brief Layout of the engine's per-file worldspace cell offset table (WRLD OFST)
+     *
+     * The loader skips the exterior-cell groups of master-flagged files and later finds those
+     * cells by seeking to fileOffsets[(x - minCellX) + (y - minCellY) * width]; a zero entry
+     * means the file has no record for that cell. Extents are stored in world units and become
+     * cell coordinates by flooring and an arithmetic shift (see K_CELL_SHIFT). Verified on
+     * 1.6.1170: TESWorldSpace::Load's OFST case (0x140305380), the index math (0x140306750),
+     * and the cell-record lookup that gates on the master flag (0x1403064C0). The tables live
+     * in the hashmap at TESWorldSpace+0x1D0 (CommonLib's unk1D0), keyed by the file's
+     * canonical threadSafeParent.
+     */
+    struct WorldCellOffsetData {
+        std::uint32_t* fileOffsets; /**< Per-cell record offsets, row-major by Y; 0 = cell absent */
+        float minX; /**< West edge of the covered rectangle, world units */
+        float minY; /**< South edge, world units */
+        float maxX; /**< East edge, world units */
+        float maxY; /**< North edge, world units */
+        std::uint32_t unk18; /**< Unknown; unused here */
+    };
+
+    /**
+     * @brief Where the worldspace's map defines cells over the near zone, at cell resolution
+     *
+     * A cell counts as map when the land-owning worldspace has an exterior cell there - found
+     * via cellMap (non-master plugins register every exterior cell at load; master-file cells
+     * appear as the engine materializes them) or via a master file's OFST table (the engine's
+     * lazy path for cells it has not materialized, see WorldCellOffsetData). Near tiles must
+     * not paint skirt water where the map has content of its own; only genuinely undefined
+     * void gets filled. Unlike the per-frame water picture this is static per (worldspace,
+     * center block), so refreshNearMapCoverage recomputes it only when either changes.
+     */
+    struct NearMapCoverage {
+        std::array<std::array<bool, K_COVERAGE_GRID>, K_COVERAGE_GRID> covered {}; /**< Cells the map defines */
+        std::array<std::array<bool, 3>, 3> blockHasMap {}; /**< Which of the 3x3 near blocks contain any map cell */
+        RE::TESWorldSpace* worldSpace = nullptr; /**< Worldspace the grid was computed for (cache key) */
+        int centerBx = std::numeric_limits<int>::max(); /**< Center block X the grid was computed for (cache key) */
+        int centerBy = std::numeric_limits<int>::max(); /**< Center block Y the grid was computed for (cache key) */
     };
 
     static inline std::vector<RE::NiPointer<RE::BSGeometry>>
@@ -107,6 +152,7 @@ private:
     static inline std::atomic_bool s_taskPending; /**< Coalesces queueUpdate calls into a single queued task */
     static inline bool s_mapMenuOpen = false; /**< True while the map menu is open and the skirt is force-hidden */
     static inline NearWaterCoverage s_nearWater; /**< Live water picture for the current frame (see updateVisibility) */
+    static inline NearMapCoverage s_nearMap; /**< Defined-cell picture for the current center block (see updateSkirt) */
 
     /**
      * @brief What classifyDonor concluded about a candidate donor mesh
@@ -307,17 +353,29 @@ private:
                                          float centerY);
 
     /**
-     * @brief Whether a near tile must not draw this frame because of the game's real water
+     * @brief Rebuilds s_nearMap: which near-zone cells the worldspace's map defines
+     *
+     * No-op while the worldspace and center block are unchanged. Walks to the land-owning
+     * worldspace first (parentUseFlags kUseLandData, mirroring the engine's own land lookup),
+     * then marks cells from the master files' OFST tables and from cellMap. Called from
+     * updateSkirt only, so the reads run on the main thread - cellMap can rehash when the
+     * engine materializes a cell, and that also happens on the main thread.
+     */
+    static void refreshNearMapCoverage();
+
+    /**
+     * @brief Whether a near tile must not draw this frame because the game has content there
      *
      * Implements the near-block representation choice (see buildLayout): a full near tile
-     * draws only while its block is water-free; subtiles draw only when the block touches
-     * water, minus those fully inside the water union. Edge-straddling subtiles keep drawing
-     * through the boundary - see the implementation for why that overlap is safe.
+     * draws only while its block is entirely free of content (no live water and no defined
+     * map cells); subtiles draw otherwise, minus those fully inside the union of live water
+     * and map cells. Edge-straddling subtiles keep drawing through the boundary - see the
+     * implementation for why that overlap is safe.
      *
      * @param rel Layout entry of the tile
      * @return bool True when the tile must be hidden this frame
      */
-    static auto isHiddenByNearWater(const RelTile& rel) -> bool;
+    static auto isHiddenByNearCoverage(const RelTile& rel) -> bool;
 
     /**
      * @brief The configured skirt radius, clamped to a workable minimum of four tile lengths
@@ -368,7 +426,8 @@ private:
      *
      * Removes the skirt when no exterior worldspace is active, recycles the existing tiles when
      * only the player's block changed, and otherwise rebuilds everything: finds a template quad,
-     * builds the layout, clones and attaches the tiles.
+     * builds the layout, clones and attaches the tiles. Both non-removal paths also refresh the
+     * near map coverage (refreshNearMapCoverage).
      */
     static void updateSkirt();
 };
