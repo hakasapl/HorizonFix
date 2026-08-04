@@ -90,7 +90,7 @@ void WaterSkirt::buildFrustumPlanes(const RE::NiCamera* camera,
     // Extract the camera basis in world space: NiCamera stores forward/up/right
     // as the columns of its world rotation
     const auto& world = camera->world;
-    const auto& frustum = camera->viewFrustum;
+    const auto& frustum = camera->GetRuntimeData2().viewFrustum;
     const RE::NiPoint3 dir = rotationColumn(world.rotate, 0);
     const RE::NiPoint3 up = rotationColumn(world.rotate, 1);
     const RE::NiPoint3 right = rotationColumn(world.rotate, 2);
@@ -178,7 +178,7 @@ void WaterSkirt::searchTemplateQuad(RE::NiAVObject* objPtr,
     // ocean chunk); degenerate shapes are ignored.
     if (auto* const shape = objPtr->AsTriShape()) {
         const float radius = shape->worldBound.radius;
-        const std::uint32_t vertexCount = shape->vertexCount;
+        const std::uint32_t vertexCount = shape->GetTrishapeRuntimeData().vertexCount;
         const bool better = (search.best == nullptr) || vertexCount < search.bestVertexCount
             || (vertexCount == search.bestVertexCount && radius > search.bestRadius);
         if (better && vertexCount > 0 && radius > 0.0F) {
@@ -188,7 +188,7 @@ void WaterSkirt::searchTemplateQuad(RE::NiAVObject* objPtr,
             const DonorCheck check = classifyDonor(shape);
             // Unmeasurable meshes are trusted only with the exact topology of an
             // engine-built water quad (see DonorVerdict)
-            const bool trustedUnverifiable = vertexCount == 4 && shape->triangleCount == 2;
+            const bool trustedUnverifiable = vertexCount == 4 && shape->GetTrishapeRuntimeData().triangleCount == 2;
             if (check.verdict == DonorVerdict::K_NOT_SOLID_WATER
                 || (check.verdict == DonorVerdict::K_UNVERIFIABLE && !trustedUnverifiable)) {
                 ++search.rejectedCount;
@@ -204,7 +204,7 @@ void WaterSkirt::searchTemplateQuad(RE::NiAVObject* objPtr,
 
     // Interior node: recurse into all children
     if (auto* const node = objPtr->AsNode()) {
-        for (const auto& child : node->children) {
+        for (const auto& child : node->GetChildren()) {
             searchTemplateQuad(child.get(), search);
         }
     }
@@ -256,7 +256,7 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
 {
     // Measuring needs the CPU copies of the buffers; the engine keeps them for meshes
     // loaded from disk, but not for everything
-    auto* const data = shape->rendererData;
+    auto* const data = shape->GetGeometryRuntimeData().rendererData;
     if ((data == nullptr) || (data->rawVertexData == nullptr) || (data->rawIndexData == nullptr)) {
         return DonorCheck {.verdict = DonorVerdict::K_UNVERIFIABLE, .detail = "no CPU copy"};
     }
@@ -266,8 +266,8 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
     // shape - and cloning a dynamic variant would copy an object whose layout the
     // rest of this pipeline does not expect. Reject outright (never trust these
     // through the engine-quad topology gate).
-    if (shape->type == RE::BSGeometry::Type::kDynamicTriShape
-        || shape->type == RE::BSGeometry::Type::kParticleShaderDynamicTriShape) {
+    if (shape->GetType() == RE::BSGeometry::Type::kDynamicTriShape
+        || shape->GetType() == RE::BSGeometry::Type::kParticleShaderDynamicTriShape) {
         return DonorCheck {.verdict = DonorVerdict::K_NOT_SOLID_WATER, .detail = "dynamic tri shape"};
     }
 
@@ -285,8 +285,8 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
     const bool floatPositions
         = data->vertexDesc.HasFlag(RE::BSGraphics::Vertex::VF_FULLPREC) || descBits == K_BARE_FLOAT4_DESC;
     const std::size_t positionSize = floatPositions ? 3 * sizeof(float) : 3 * sizeof(std::uint16_t);
-    const std::uint32_t vertexCount = shape->vertexCount;
-    const std::uint32_t triangleCount = shape->triangleCount;
+    const std::uint32_t vertexCount = shape->GetTrishapeRuntimeData().vertexCount;
+    const std::uint32_t triangleCount = shape->GetTrishapeRuntimeData().triangleCount;
     constexpr std::size_t MAX_STRIDE = 64;
     if (vertexCount == 0 || triangleCount == 0 || stride < positionSize || stride > MAX_STRIDE) {
         return DonorCheck {.verdict = DonorVerdict::K_UNVERIFIABLE, .detail = "unexpected vertex layout"};
@@ -358,7 +358,7 @@ auto WaterSkirt::classifyDonor(const RE::BSTriShape* shape) -> DonorCheck
     // was decoded as halfs - see K_BARE_FLOAT4_DESC above; with the correct decode they
     // measure properly. The gate remains for meshes whose CPU copy is genuinely stale.)
     const float decodedHalfDiagonal = 0.5F * std::hypot(extentX, extentY);
-    const float modelRadius = shape->modelBound.radius;
+    const float modelRadius = shape->GetModelData().modelBound.radius;
     const bool decodeConsistent
         = modelRadius > 0.0F && decodedHalfDiagonal >= 0.5F * modelRadius && decodedHalfDiagonal <= 2.0F * modelRadius;
     if (!decodeConsistent) {
@@ -391,7 +391,7 @@ void WaterSkirt::updateVisibility()
         return;
     }
     const auto camPos = camera->world.translate;
-    const float farClip = camera->viewFrustum.fFar;
+    const float farClip = camera->GetRuntimeData2().viewFrustum.fFar;
     if (farClip <= 0.0F) {
         return;
     }
@@ -446,7 +446,7 @@ void WaterSkirt::updateVisibility()
         // Only touch the cull flag when the state actually changes, to avoid
         // needless scene-graph dirtying
         const bool visible = !hiddenByCoverage && boundInFrustum(bound, planes);
-        if (tile->flags.any(RE::NiAVObject::Flag::kHidden) == visible) {
+        if (tile->GetFlags().any(RE::NiAVObject::Flag::kHidden) == visible) {
             tile->SetAppCulled(!visible);
         }
     }
@@ -1034,8 +1034,8 @@ void WaterSkirt::updateSkirt()
         }
         tile->name = K_TILE_NAME;
         tile->SetAppCulled(false);
-        tile->flags.set(RE::NiAVObject::Flag::kAlwaysDraw);
-        tile->modelBound.radius = K_CULL_PROOF_RADIUS;
+        tile->GetFlags().set(RE::NiAVObject::Flag::kAlwaysDraw);
+        tile->GetModelData().modelBound.radius = K_CULL_PROOF_RADIUS;
         s_skirtRoot->AttachChild(tile.get(), true);
         tile->Update(updateData);
         s_tiles.emplace_back(std::move(tile));
