@@ -2,16 +2,10 @@
     "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
     "name": "horizonfix",
     "version-string": "0.1.0",
-    "features": {
-        "commonlibsse-ng": {
-            "description": "Dependencies of clib-ng",
-            "dependencies": [
-                "rsm-binary-io",
-                "spdlog"
-            ]
-        }
-    },
-    "default-features": [
-        "commonlibsse-ng"
+    "dependencies": [
+        "directxtk",
+        "rapidcsv",
+        "rsm-binary-io",
+        "spdlog"
     ]
 }

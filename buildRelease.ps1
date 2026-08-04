@@ -1,18 +1,13 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Configures and builds both the SE (1.5.97) and AE (1.6.x) variants of the
-    plugin in RelWithDebInfo, then stages the artifacts into dist/.
+    Configures and builds the plugin in RelWithDebInfo, then stages the artifacts into dist/.
 
 .DESCRIPTION
-    Produces two flavors from the one source tree (see CMakeLists.txt):
-      - AE: SKYRIM_SUPPORT_AE=ON  -> dist/ae/
-      - SE: SKYRIM_SUPPORT_AE=OFF -> dist/se/
-
-    Both flavors build the same file names (HorizonFix.dll/.pdb); each variant
-    is built in its own build directory and staged only from there, so the two
-    never mix. For each flavor the built DLL and PDB, plus everything in the
-    package/ folder, are copied into the matching dist subfolder.
+    CommonLibSSE-NG resolves addresses and struct layouts at runtime, so a single
+    HorizonFix.dll serves every supported Skyrim runtime - there are no per-flavor
+    builds. The built DLL and PDB, plus everything in the package/ folder, are copied into
+    dist/SKSE/Plugins.
 
 .PARAMETER Config
     CMake build configuration. Defaults to RelWithDebInfo.
@@ -31,16 +26,10 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $RepoRoot = $PSScriptRoot
-$BuildRoot = Join-Path $RepoRoot "buildRel"
+$BuildDir = Join-Path $RepoRoot "buildRel"
 $DistRoot = Join-Path $RepoRoot "dist"
 $PackageDir = Join-Path $RepoRoot "package"
-
-# variant name, CMake flag value, plugin/DLL base name (identical for both;
-# the variants are separated by their dist subfolders, not by file name)
-$Variants = @(
-    [pscustomobject]@{ Name = "ae"; SupportAE = "ON"; Plugin = "HorizonFix" }
-    [pscustomobject]@{ Name = "se"; SupportAE = "OFF"; Plugin = "HorizonFix" }
-)
+$PluginName = "HorizonFix"
 
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 
@@ -95,50 +84,46 @@ function Resolve-VcpkgToolchain {
 
 # --- Clean and recreate output folders ---------------------------------------
 Write-Step "Cleaning output folders"
-foreach ($dir in @($BuildRoot, $DistRoot)) {
+foreach ($dir in @($BuildDir, $DistRoot)) {
     if (Test-Path $dir) { Remove-Item -Path $dir -Recurse -Force }
 }
-New-Item -ItemType Directory -Path $BuildRoot | Out-Null
-New-Item -ItemType Directory -Path $DistRoot  | Out-Null
+New-Item -ItemType Directory -Path $BuildDir | Out-Null
+New-Item -ItemType Directory -Path $DistRoot | Out-Null
 
 Enter-DevEnvironment
 $Toolchain = Resolve-VcpkgToolchain
 Write-Step "Using vcpkg toolchain: $Toolchain"
 
-# --- Configure, build and stage each variant ---------------------------------
-foreach ($v in $Variants) {
-    $buildDir = Join-Path $BuildRoot $v.Name
-    $distDir = Join-Path (Join-Path $DistRoot $v.Name) "SKSE\plugins"
-    New-Item -ItemType Directory -Path $distDir | Out-Null
+# --- Configure, build and stage ----------------------------------------------
+$distDir = Join-Path $DistRoot "SKSE\plugins"
+New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
-    Write-Step "Configuring $($v.Name.ToUpper()) variant (SKYRIM_SUPPORT_AE=$($v.SupportAE))"
-    & cmake -S $RepoRoot -B $buildDir -G Ninja `
-        "-DCMAKE_BUILD_TYPE=$Config" `
-        "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
-        "-DVCPKG_TARGET_TRIPLET=x64-windows-static" `
-        "-DSKYRIM_SUPPORT_AE=$($v.SupportAE)"
-    if ($LASTEXITCODE -ne 0) { throw "CMake configure failed for $($v.Name)." }
+Write-Step "Configuring"
+& cmake -S $RepoRoot -B $BuildDir -G Ninja `
+    "-DCMAKE_BUILD_TYPE=$Config" `
+    "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
+    "-DVCPKG_TARGET_TRIPLET=x64-windows-static"
+if ($LASTEXITCODE -ne 0) { throw "CMake configure failed." }
 
-    Write-Step "Building $($v.Name.ToUpper()) variant"
-    & cmake --build $buildDir --config $Config
-    if ($LASTEXITCODE -ne 0) { throw "Build failed for $($v.Name)." }
+Write-Step "Building"
+& cmake --build $BuildDir --config $Config
+if ($LASTEXITCODE -ne 0) { throw "Build failed." }
 
-    Write-Step "Staging artifacts into $distDir"
-    $dll = Get-ChildItem -Path $buildDir -Recurse -Filter "$($v.Plugin).dll" | Select-Object -First 1
-    if (-not $dll) { throw "Built DLL '$($v.Plugin).dll' not found under $buildDir." }
-    Copy-Item -Path $dll.FullName -Destination $distDir -Force
+Write-Step "Staging artifacts into $distDir"
+$dll = Get-ChildItem -Path $BuildDir -Recurse -Filter "$PluginName.dll" | Select-Object -First 1
+if (-not $dll) { throw "Built DLL '$PluginName.dll' not found under $BuildDir." }
+Copy-Item -Path $dll.FullName -Destination $distDir -Force
 
-    $pdb = Get-ChildItem -Path $buildDir -Recurse -Filter "$($v.Plugin).pdb" | Select-Object -First 1
-    if ($pdb) {
-        Copy-Item -Path $pdb.FullName -Destination $distDir -Force
-    }
-    else {
-        Write-Warning "PDB '$($v.Plugin).pdb' not found under $buildDir."
-    }
+$pdb = Get-ChildItem -Path $BuildDir -Recurse -Filter "$PluginName.pdb" | Select-Object -First 1
+if ($pdb) {
+    Copy-Item -Path $pdb.FullName -Destination $distDir -Force
+}
+else {
+    Write-Warning "PDB '$PluginName.pdb' not found under $BuildDir."
+}
 
-    if (Test-Path $PackageDir) {
-        Copy-Item -Path (Join-Path $PackageDir "*") -Destination $distDir -Recurse -Force
-    }
+if (Test-Path $PackageDir) {
+    Copy-Item -Path (Join-Path $PackageDir "*") -Destination $distDir -Recurse -Force
 }
 
 Write-Step "Done. Artifacts staged in $DistRoot"

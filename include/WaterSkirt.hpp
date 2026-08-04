@@ -263,8 +263,8 @@ private:
     /**
      * @brief Reads TES::worldSpace in a way that is safe on every runtime
      *
-     * Works around the TES layout change in game patch 1.6.1130 (see the implementation for
-     * details); reading the struct member directly would misread the field on older runtimes.
+     * Thin wrapper over CommonLibSSE-NG's GetRuntimeData2(), which already carries the version
+     * guard for the TES layout change in game patch 1.6.1130.
      *
      * @param tesPtr The TES singleton
      * @return RE::TESWorldSpace* The current exterior worldspace, or nullptr
