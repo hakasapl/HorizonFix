@@ -19,9 +19,7 @@ add_compile_definitions(PLUGIN_NAME="${PLUGIN_NAME}")
 add_compile_definitions(PLUGIN_VERSION="${PLUGIN_VERSION}")
 
 # CommonLibSSE-NG resolves game addresses and struct layouts at runtime, so one DLL serves
-# every supported runtime. SE, AE, and VR are all enabled; the two vtable hooks (Atmosphere::Update,
-# BSWaterShader::SetupGeometry/RestoreGeometry) and the TESWorldSpace fields WaterSkirt.cpp reads
-# (cellMap, unk1D0) have all been reverse engineered/verified for VR.
+# every supported runtime: SE, AE, and VR are all enabled.
 set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(ENABLE_SKYRIM_SE ON CACHE BOOL "" FORCE)
 set(ENABLE_SKYRIM_AE ON CACHE BOOL "" FORCE)
