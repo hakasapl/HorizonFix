@@ -21,6 +21,23 @@
 
 using namespace HorizonFix;
 
+namespace {
+
+class RuntimeSizedNiNode : public RE::NiNode {
+public:
+    static auto create(std::uint16_t childCapacity) -> RE::NiNode*
+    {
+        // CommonLib's cross-runtime NiNode layout omits runtime data, but the
+        // engine constructor still writes the full object for the active game.
+        constexpr std::size_t FLAT_SIZE = 0x128;
+        constexpr std::size_t VR_SIZE = 0x150;
+        auto* const node = RE::malloc_runtime<RuntimeSizedNiNode>(FLAT_SIZE, VR_SIZE);
+        return node != nullptr ? node->Ctor(childCapacity) : nullptr;
+    }
+};
+
+} // namespace
+
 auto WaterSkirt::halfToFloat(std::uint16_t half) -> float
 {
     // IEEE 754 binary16 (half) and binary32 (float) field layouts
@@ -1008,7 +1025,7 @@ void WaterSkirt::updateSkirt()
 
     // All tiles live under a dedicated root node, in true world coordinates.
     const auto childHint = static_cast<std::uint16_t>(std::min<std::size_t>(s_layout.size(), 0xFFFF));
-    s_skirtRoot = RE::NiPointer<RE::NiNode> {RE::NiNode::Create(childHint)};
+    s_skirtRoot = RE::NiPointer<RE::NiNode> {RuntimeSizedNiNode::create(childHint)};
     if (!s_skirtRoot) {
         return;
     }
