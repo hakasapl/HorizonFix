@@ -1,3 +1,4 @@
-[submodule "extern/CommonLibSSE"]
-	path = extern/CommonLibSSE
-	url = https://github.com/powerof3/CommonLibSSE
+[submodule "extern/CommonLibSSE-NG"]
+	path = extern/CommonLibSSE-NG
+	url = https://github.com/alandtse/CommonLibSSE-NG.git
+	branch = ng

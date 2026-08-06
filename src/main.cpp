@@ -52,28 +52,6 @@ void installHooks()
 }
 
 /**
- * @brief Checks that the running game's flavor (AE vs SE) matches what this DLL was built for
- *
- * The plugin ships as separate AE and SE builds; loading the wrong one would use mismatched
- * struct layouts and addresses.
- *
- * @return true If the runtime flavor matches the build flavor
- * @return false If it does not (the plugin should refuse to load)
- */
-auto runtimeMatchesBuild() -> bool
-{
-#ifdef SKYRIM_SUPPORT_AE
-    constexpr bool BUILT_FOR_AE = true;
-#else
-    constexpr bool BUILT_FOR_AE = false;
-#endif
-    // AE is every 1.6.x runtime; SE is 1.5.x and below
-    const auto version = REL::Module::get().version();
-    const bool runtimeIsAE = version.minor() >= 6;
-    return runtimeIsAE == BUILT_FOR_AE;
-}
-
-/**
  * @brief MessageHandler for HorizonFix
  *
  * @param msg The received message
@@ -105,20 +83,25 @@ void messageHandler(SKSE::MessagingInterface::Message* msg)
 } // namespace
 
 //
-// CommonLib/SKSE Exports
+// CommonLibSSE-NG / SKSE Exports
 //
 
-extern "C" __declspec(dllexport) bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* skse) // NOLINT
+SKSEPluginInfo(.Version = REL::Version {0,
+                                        1,
+                                        0,
+                                        0},
+               .Name = "HorizonFix",
+               .Author = "hakasapl",
+               .StructCompatibility = SKSE::StructCompatibility::Independent,
+               .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)
+
+    SKSEPluginLoad(const SKSE::LoadInterface* skse)
 {
     SKSE::Init(skse);
     setupLog();
 
-    spdlog::info("{} {} loading", PLUGIN_NAME, PLUGIN_VERSION);
-
-    // Refuse to load an AE build on SE (and vice versa) instead of crashing later
-    if (!runtimeMatchesBuild()) {
-        return false;
-    }
+    const auto version = REL::Module::get().version();
+    spdlog::info("{} {} loading (runtime {})", PLUGIN_NAME, PLUGIN_VERSION, version.string("."));
 
     // Read the INI once, then patch the engine vtables while nothing is rendering yet
     ConfigLoader::loadConfig();
@@ -131,32 +114,5 @@ extern "C" __declspec(dllexport) bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadIn
     }
 
     spdlog::info("{} loaded", PLUGIN_NAME);
-    return true;
-}
-
-#ifdef SKYRIM_SUPPORT_AE
-extern "C" __declspec(dllexport) constinit auto SKSEPlugin_Version // NOLINT
-    = []() noexcept -> SKSE::PluginVersionData {
-    SKSE::PluginVersionData v;
-    v.PluginName(PLUGIN_NAME);
-    v.PluginVersion(REL::Version(PLUGIN_VERSION));
-    v.UsesAddressLibrary();
-    v.UsesUpdatedStructs();
-    v.CompatibleVersions({SKSE::RUNTIME_SSE_LATEST});
-    return v;
-}();
-#endif
-
-extern "C" __declspec(dllexport) bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface*, // NOLINT
-                                                               SKSE::PluginInfo* pluginInfo)
-{
-#ifdef SKYRIM_SUPPORT_AE
-    pluginInfo->name = &SKSEPlugin_Version.pluginName[0];
-    pluginInfo->version = SKSEPlugin_Version.pluginVersion;
-#else
-    pluginInfo->name = PLUGIN_NAME;
-    pluginInfo->version = 1;
-#endif
-    pluginInfo->infoVersion = SKSE::PluginInfo::kVersion;
     return true;
 }

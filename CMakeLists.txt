@@ -6,13 +6,6 @@ if(POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW)
 endif()
 
-# One source tree, two runtime flavors: configure with -DSKYRIM_SUPPORT_AE=ON
-# (default) for AE 1.6.x, or OFF for SE 1.5.97. CommonLibSSE selects address
-# library IDs and struct layouts from the same flag at compile time. Both
-# flavors ship as HorizonFix.dll and are distributed in separate se/ae folders;
-# a runtime version guard in main.cpp makes a wrong-flavor DLL exit cleanly.
-option(SKYRIM_SUPPORT_AE "Build for Skyrim AE (1.6.x); OFF builds for SE (1.5.97)" ON)
-
 set(PLUGIN_NAME "HorizonFix")
 set(PLUGIN_VERSION "0.4.1")
 project(${PLUGIN_NAME} VERSION ${PLUGIN_VERSION} LANGUAGES CXX)
@@ -25,8 +18,13 @@ endif()
 add_compile_definitions(PLUGIN_NAME="${PLUGIN_NAME}")
 add_compile_definitions(PLUGIN_VERSION="${PLUGIN_VERSION}")
 
+# CommonLibSSE-NG resolves game addresses and struct layouts at runtime, so one DLL serves
+# every supported runtime: SE, AE, and VR are all enabled.
 set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-add_subdirectory("extern/CommonLibSSE" commonlibsse)
+set(ENABLE_SKYRIM_SE ON CACHE BOOL "" FORCE)
+set(ENABLE_SKYRIM_AE ON CACHE BOOL "" FORCE)
+set(ENABLE_SKYRIM_VR ON CACHE BOOL "" FORCE)
+add_subdirectory("extern/CommonLibSSE-NG" commonlibsse)
 
 set(headers
     "include/ConfigLoader.hpp"

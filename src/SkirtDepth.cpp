@@ -105,8 +105,8 @@ auto SkirtDepth::isSkirtPass(RE::BSRenderPass* passPtr) -> bool
 
 auto SkirtDepth::getContext() -> REX::W32::ID3D11DeviceContext*
 {
-    auto* const rendererData = RE::BSGraphics::Renderer::GetRendererData();
-    return rendererData != nullptr ? rendererData->context : nullptr;
+    auto* const renderer = RE::BSGraphics::Renderer::GetSingleton();
+    return renderer != nullptr ? renderer->GetRuntimeData().context : nullptr;
 }
 
 auto SkirtDepth::getNoClipState(REX::W32::ID3D11RasterizerState* currentPtr) -> REX::W32::ID3D11RasterizerState*
