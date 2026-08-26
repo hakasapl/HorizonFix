@@ -86,13 +86,23 @@ void messageHandler(SKSE::MessagingInterface::Message* msg)
 // CommonLibSSE-NG / SKSE Exports
 //
 
+// In the exported SKSEPlugin_Version blob the StructCompatibility field occupies the
+// versionIndependenceEx dword (PluginDeclarationInfo 0x300 lands on PluginVersionData 0x304),
+// so besides Independent (= kVersionIndependentEx_NoStructUse) it must also carry
+// kVersionIndependentEx_AddressLibraryV5: SKSE on 1.7.99+ refuses address-library plugins
+// that don't declare the v5 database format (CommonLibSSE-NG 6.7.0 reads v1/v2/v5 alike),
+// while every earlier SKSE only tests the bits it knows and ignores this one.
+// CommonLibSSE-NG 6.7.0 sets the flag only in the PluginVersionData default, which the
+// SKSEPluginInfo/PluginDeclaration path doesn't use - hence this OR until it grows a field.
 SKSEPluginInfo(.Version = REL::Version {0,
                                         1,
                                         0,
                                         0},
                .Name = "HorizonFix",
                .Author = "hakasapl",
-               .StructCompatibility = SKSE::StructCompatibility::Independent,
+               .StructCompatibility = static_cast<SKSE::StructCompatibility>(
+                   std::to_underlying(SKSE::StructCompatibility::Independent)
+                   | SKSE::PluginVersionData::kVersionIndependentEx_AddressLibraryV5),
                .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)
 
     SKSEPluginLoad(const SKSE::LoadInterface* skse)
