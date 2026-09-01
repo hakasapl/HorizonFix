@@ -44,7 +44,14 @@ private:
         = "HorizonFix\\HorizonBand.nif"; /**< Donor NIF path, relative to Data/Meshes */
 
     static constexpr int K_SEGMENTS = 96; /**< Ring segments; radius error of the polygon is ~0.05% */
-    static constexpr int K_ROWS = 7; /**< Vertex rows for the vertical alpha gradient */
+    static constexpr int K_ROWS
+        = 15; /**< Vertex rows for the vertical gradient. MUST BE ODD so one row lands exactly on the seam
+                 (t = 0) at full alpha. The profile between rows is linear, and the eye amplifies the slope
+                 breaks at row joints into visible bands (Mach banding) - more rows push the joints below
+                 visibility at typical blend angles. The remaining banding in very shallow ramps is 8-bit
+                 render-target quantization (the same effect as the vanilla sky's banded gradients), which
+                 vertex data cannot dither away. */
+    static_assert(K_ROWS % 2 == 1, "a row must land exactly on the seam line");
 
     // The ring is split into this many arc tri shapes, each with a tight bound centered on
     // the arc itself. As one object the band's bound center would ride the camera (the ring
@@ -56,7 +63,8 @@ private:
     // Per-arc bounds sit ~0.9x the band radius from the camera, so every arc honestly
     // sorts as the farthest translucent and everything nearer composites over it.
     static constexpr int K_ARCS = 8; /**< Arc tri shapes forming the ring; divides K_SEGMENTS evenly */
-    static_assert(K_SEGMENTS % K_ARCS == 0, "arcs must tile the ring exactly");
+    static_assert(K_SEGMENTS % K_ARCS == 0,
+                  "arcs must tile the ring exactly");
     static constexpr float K_FARCLIP_FRACTION
         = 0.9F; /**< The band's farthest point (its top/bottom rim) sits at this fraction of the far clip */
 
@@ -136,10 +144,14 @@ private:
     static inline std::array<std::array<float, 2>, K_MATCH_TOTAL>
         s_sampleUV {}; /**< Sample points in 0-1 viewport coordinates; x < 0 = invalid. Game side writes */
     static inline std::atomic<bool> s_samplesValid {false}; /**< Any sample point usable this frame */
-    static inline std::array<std::atomic<float>, 3>
-        s_waterCorrection {1.0F, 1.0F, 1.0F}; /**< Per-channel multiplier the loop applies to the fog-far tint */
-    static inline std::array<std::atomic<float>, 3>
-        s_skyCorrection {1.0F, 1.0F, 1.0F}; /**< Per-channel multiplier the loop applies to the horizon tint */
+    static inline std::array<std::atomic<float>, 3> s_waterCorrection {
+        1.0F,
+        1.0F,
+        1.0F}; /**< Per-channel multiplier the loop applies to the fog-far tint */
+    static inline std::array<std::atomic<float>, 3> s_skyCorrection {
+        1.0F,
+        1.0F,
+        1.0F}; /**< Per-channel multiplier the loop applies to the horizon tint */
 
     /**
      * @brief Hook for BSEffectShader::SetupGeometry: refreshes a band arc's vertex-color
