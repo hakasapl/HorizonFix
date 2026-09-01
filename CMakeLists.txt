@@ -7,7 +7,7 @@ if(POLICY CMP0091)
 endif()
 
 set(PLUGIN_NAME "HorizonFix")
-set(PLUGIN_VERSION "0.6.0")
+set(PLUGIN_VERSION "0.7.0")
 project(${PLUGIN_NAME} VERSION ${PLUGIN_VERSION} LANGUAGES CXX)
 
 if(MSVC)
@@ -28,6 +28,7 @@ add_subdirectory("extern/CommonLibSSE-NG" commonlibsse)
 
 set(headers
     "include/ConfigLoader.hpp"
+    "include/HorizonBand.hpp"
     "include/PCH.h"
     "include/SkirtCull.hpp"
     "include/SkirtDepth.hpp"
@@ -36,6 +37,7 @@ set(headers
 
 set(sources
     "src/ConfigLoader.cpp"
+    "src/HorizonBand.cpp"
     "src/main.cpp"
     "src/SkirtCull.cpp"
     "src/SkirtDepth.cpp"

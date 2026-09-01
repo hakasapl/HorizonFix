@@ -227,6 +227,16 @@ public:
      */
     static void setMapMenuOpen(bool open);
 
+    /**
+     * @brief The configured skirt radius, clamped to a workable minimum of four tile lengths
+     *
+     * Public because the horizon blend band tracks the water-sky seam, which sits at the
+     * skirt's outer rim at exactly this distance.
+     *
+     * @return float Radius in game units used for layout
+     */
+    static auto effectiveRadius() -> float;
+
 private:
     /**
      * @brief Extracts one column of a rotation matrix as a vector (a world-space basis axis)
@@ -376,13 +386,6 @@ private:
      * @return bool True when the tile must be hidden this frame
      */
     static auto isHiddenByNearCoverage(const RelTile& rel) -> bool;
-
-    /**
-     * @brief The configured skirt radius, clamped to a workable minimum of four tile lengths
-     *
-     * @return float Radius in game units used for layout
-     */
-    static auto effectiveRadius() -> float;
 
     /**
      * @brief Adds one candidate tile to s_layout, quad-splitting tiles that straddle the rim

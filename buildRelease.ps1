@@ -6,8 +6,8 @@
 .DESCRIPTION
     CommonLibSSE-NG resolves addresses and struct layouts at runtime, so a single
     HorizonFix.dll serves every supported Skyrim runtime - there are no per-flavor
-    builds. The built DLL and PDB, plus everything in the package/ folder, are copied into
-    dist/SKSE/Plugins.
+    builds. The built DLL and PDB are copied into dist/SKSE/Plugins; the package/
+    folder mirrors the game's Data folder and is copied into dist/ as-is.
 
 .PARAMETER Config
     CMake build configuration. Defaults to RelWithDebInfo.
@@ -122,8 +122,10 @@ else {
     Write-Warning "PDB '$PluginName.pdb' not found under $BuildDir."
 }
 
+# package/ mirrors the game's Data folder (SKSE/Plugins/, Meshes/, ...), so it
+# lands at the dist root, not inside SKSE/plugins
 if (Test-Path $PackageDir) {
-    Copy-Item -Path (Join-Path $PackageDir "*") -Destination $distDir -Recurse -Force
+    Copy-Item -Path (Join-Path $PackageDir "*") -Destination $DistRoot -Recurse -Force
 }
 
 Write-Step "Done. Artifacts staged in $DistRoot"

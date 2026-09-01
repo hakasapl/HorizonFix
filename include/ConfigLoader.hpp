@@ -23,6 +23,9 @@ private:
     constexpr static float DEFAULT_RIM_QUALITY = 2.0F; /**< Default rim subdivision level (iWaterSkirtRimQuality) */
     constexpr static int MAX_RIM_QUALITY
         = 6; /**< Upper clamp for rim quality; each level quadruples potential rim tiles */
+    constexpr static float DEFAULT_HORIZON_BLEND = 0.0F; /**< Default horizon blend angle: 0 = feature disabled */
+    constexpr static float MAX_HORIZON_BLEND
+        = 45.0F; /**< Upper clamp for the blend angle; beyond this the haze band dominates the view */
 
     /**
      * @brief ConfigMap structure which holds the configuration values for the plugin
@@ -30,6 +33,8 @@ private:
     struct ConfigMap {
         float skirtRadius {}; /**< Radius of the water skirt around the player, in game units */
         int rimQuality {}; /**< How many times rim tiles may be quad-split to approximate the circular edge */
+        float horizonBlendDegrees {}; /**< Angular height of the water-to-sky horizon blend, in degrees above and
+                                         below the waterline (fHorizonBlendDegrees); 0 disables the blend */
         std::vector<std::string>
             worldSpaceBlocklist; /**< Worldspace editor IDs where the skirt is disabled (sWorldSpaceBlocklist) */
         std::vector<std::string> smallWorldAllowlist; /**< Small World-flagged worldspace editor IDs where the skirt is
@@ -64,6 +69,16 @@ public:
      * @return int The rim quality value from the configuration
      */
     static auto getRimQuality() -> int;
+
+    /**
+     * @brief Get the horizon blend angle (fHorizonBlendDegrees)
+     *
+     * The water-to-sky blend spans this many degrees above and below the waterline at the
+     * horizon, regardless of the active weather; 0 (the default) disables the blend entirely.
+     *
+     * @return float The blend angle in degrees, clamped to [0, 45]
+     */
+    static auto getHorizonBlendDegrees() -> float;
 
     /**
      * @brief Whether a worldspace is on the user's blocklist (sWorldSpaceBlocklist)
