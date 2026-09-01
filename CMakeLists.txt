@@ -28,6 +28,7 @@ add_subdirectory("extern/CommonLibSSE-NG" commonlibsse)
 
 set(headers
     "include/ConfigLoader.hpp"
+    "include/HorizonBand.hpp"
     "include/PCH.h"
     "include/SkirtCull.hpp"
     "include/SkirtDepth.hpp"
@@ -36,6 +37,7 @@ set(headers
 
 set(sources
     "src/ConfigLoader.cpp"
+    "src/HorizonBand.cpp"
     "src/main.cpp"
     "src/SkirtCull.cpp"
     "src/SkirtDepth.cpp"

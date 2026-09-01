@@ -1,6 +1,7 @@
 #include "WaterSkirt.hpp"
 
 #include "ConfigLoader.hpp"
+#include "HorizonBand.hpp"
 
 #include "PCH.h"
 
@@ -212,6 +213,10 @@ void WaterSkirt::searchTemplateQuad(RE::NiAVObject* objPtr,
 
 void WaterSkirt::removeSkirt()
 {
+    // The horizon blend band hangs under the skirt root; unhook it first so its cached
+    // model survives the root teardown below
+    HorizonBand::detach();
+
     // Detach every tile from the scene graph; the NiPointers in s_tiles still
     // hold the last references until the clear below
     for (const auto& tile : s_tiles) {
@@ -396,6 +401,9 @@ void WaterSkirt::updateVisibility()
         return;
     }
     const float proxyDist = 0.5F * farClip;
+
+    // Keep the horizon blend band glued to the camera and tinted to this frame's sky
+    HorizonBand::updateFrame(camera);
 
     FrustumPlanes planes {};
     buildFrustumPlanes(camera, planes);
@@ -963,6 +971,7 @@ void WaterSkirt::updateSkirt()
         s_centerBx = centerBx;
         s_centerBy = centerBy;
         refreshNearMapCoverage();
+        HorizonBand::ensure(s_skirtRoot.get(), s_skirtHeight);
         return;
     }
 
@@ -1047,6 +1056,10 @@ void WaterSkirt::updateSkirt()
     s_centerBx = centerBx;
     s_centerBy = centerBy;
     refreshNearMapCoverage();
+
+    // The horizon blend band (if enabled) lives under the skirt root and shares its
+    // worldspace gating and map-menu hiding
+    HorizonBand::ensure(s_skirtRoot.get(), s_skirtHeight);
 
     // If the map opened while we were building, honor the hidden state immediately
     if (s_mapMenuOpen) {
