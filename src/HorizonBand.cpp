@@ -139,33 +139,37 @@ void HorizonBand::computeSampleUVs(const RE::NiCamera* camera,
     }
     forwardHorizontal /= forwardLength;
 
-    // Rays fan out around the camera's horizontal heading; each hits the band ring at a
-    // row below the seam, inside the band's strong-alpha zone (K_MATCH_ROW_T)
-    const float sampleZOffset = (bandZ + (K_MATCH_ROW_T * halfHeightWorld)) - world.translate.z;
-    for (int i = 0; i < K_MATCH_SAMPLES; ++i) {
-        auto& sample = s_sampleUV.at(i);
-        sample.at(0) = -1.0F;
-        const float azimuth = static_cast<float>(i - ((K_MATCH_SAMPLES - 1) / 2)) * K_MATCH_AZIMUTH_STEP
-            * std::numbers::pi_v<float> / 180.0F;
-        const float sinAz = std::sin(azimuth);
-        const float cosAz = std::cos(azimuth);
-        const RE::NiPoint3 toSample {((cosAz * forwardHorizontal.x) - (sinAz * forwardHorizontal.y)) * scale,
-                                     ((sinAz * forwardHorizontal.x) + (cosAz * forwardHorizontal.y)) * scale,
-                                     sampleZOffset};
-        const float depth = toSample.Dot(forward);
-        if (depth < 1.0F) {
-            continue;
+    // Rays fan out around the camera's horizontal heading on two band rows: one below the
+    // seam (water reference) and one above (sky reference), both inside the band's
+    // strong-alpha zone
+    constexpr std::array<float, 2> ROW_TS {K_MATCH_ROW_T_WATER, K_MATCH_ROW_T_SKY};
+    for (int rowIndex = 0; rowIndex < 2; ++rowIndex) {
+        const float sampleZOffset = (bandZ + (ROW_TS.at(rowIndex) * halfHeightWorld)) - world.translate.z;
+        for (int i = 0; i < K_MATCH_SAMPLES; ++i) {
+            auto& sample = s_sampleUV.at((static_cast<std::size_t>(rowIndex) * K_MATCH_SAMPLES) + i);
+            sample.at(0) = -1.0F;
+            const float azimuth = static_cast<float>(i - ((K_MATCH_SAMPLES - 1) / 2)) * K_MATCH_AZIMUTH_STEP
+                * std::numbers::pi_v<float> / 180.0F;
+            const float sinAz = std::sin(azimuth);
+            const float cosAz = std::cos(azimuth);
+            const RE::NiPoint3 toSample {((cosAz * forwardHorizontal.x) - (sinAz * forwardHorizontal.y)) * scale,
+                                         ((sinAz * forwardHorizontal.x) + (cosAz * forwardHorizontal.y)) * scale,
+                                         sampleZOffset};
+            const float depth = toSample.Dot(forward);
+            if (depth < 1.0F) {
+                continue;
+            }
+            const float u = ((toSample.Dot(right) / depth) - frustum.fLeft) / horizontalWidth;
+            const float v = (frustum.fTop - (toSample.Dot(up) / depth)) / verticalHeight;
+            // Keep a safety margin from the viewport edges (dynamic resolution, TAA jitter)
+            constexpr float MARGIN = 0.03F;
+            if (u < MARGIN || u > 1.0F - MARGIN || v < MARGIN || v > 1.0F - MARGIN) {
+                continue;
+            }
+            sample.at(0) = u;
+            sample.at(1) = v;
+            anyValid = true;
         }
-        const float u = ((toSample.Dot(right) / depth) - frustum.fLeft) / horizontalWidth;
-        const float v = (frustum.fTop - (toSample.Dot(up) / depth)) / verticalHeight;
-        // Keep a safety margin from the viewport edges (dynamic resolution, TAA jitter)
-        constexpr float MARGIN = 0.03F;
-        if (u < MARGIN || u > 1.0F - MARGIN || v < MARGIN || v > 1.0F - MARGIN) {
-            continue;
-        }
-        sample.at(0) = u;
-        sample.at(1) = v;
-        anyValid = true;
     }
     s_samplesValid.store(anyValid, std::memory_order_release);
 }
@@ -327,7 +331,7 @@ void HorizonBand::captureMatchSamples(bool post)
             return;
         }
         REX::W32::D3D11_TEXTURE2D_DESC stagingDesc {};
-        stagingDesc.width = K_MATCH_SAMPLES;
+        stagingDesc.width = K_MATCH_TOTAL;
         stagingDesc.height = 2;
         stagingDesc.mipLevels = 1;
         stagingDesc.arraySize = 1;
@@ -354,7 +358,7 @@ void HorizonBand::captureMatchSamples(bool post)
     if (!post) {
         slot.uv = s_sampleUV; // freeze the points for this capture pair and its readback
     }
-    for (int i = 0; i < K_MATCH_SAMPLES; ++i) {
+    for (int i = 0; i < K_MATCH_TOTAL; ++i) {
         const float u = slot.uv.at(i).at(0);
         const float v = slot.uv.at(i).at(1);
         if (u < 0.0F) {
@@ -405,10 +409,10 @@ void HorizonBand::consumeMatchSlot(std::uint32_t frame)
     const std::uint32_t stride = texelSize(s_matchFormat);
     const auto* const preRow = static_cast<const std::uint8_t*>(mapped.data);
     const auto* const postRow = preRow + mapped.rowPitch;
-    std::array<float, 3> errorSum {};
-    std::array<float, 3> preSum {};
-    int used = 0;
-    for (int i = 0; i < K_MATCH_SAMPLES; ++i) {
+    std::array<std::array<float, 3>, 2> errorSum {};
+    std::array<std::array<float, 3>, 2> preSum {};
+    std::array<int, 2> used {};
+    for (int i = 0; i < K_MATCH_TOTAL; ++i) {
         if (slot.uv.at(i).at(0) < 0.0F) {
             continue;
         }
@@ -418,31 +422,56 @@ void HorizonBand::consumeMatchSlot(std::uint32_t frame)
             || !decodeTexel(postRow + (static_cast<std::size_t>(i) * stride), s_matchFormat, postColor)) {
             continue;
         }
-        errorSum.at(0) += pre.red - postColor.red;
-        errorSum.at(1) += pre.green - postColor.green;
-        errorSum.at(2) += pre.blue - postColor.blue;
-        preSum.at(0) += pre.red;
-        preSum.at(1) += pre.green;
-        preSum.at(2) += pre.blue;
-        ++used;
+        const int rowIndex = i / K_MATCH_SAMPLES; // 0 = water row, 1 = sky row
+        errorSum.at(rowIndex).at(0) += pre.red - postColor.red;
+        errorSum.at(rowIndex).at(1) += pre.green - postColor.green;
+        errorSum.at(rowIndex).at(2) += pre.blue - postColor.blue;
+        preSum.at(rowIndex).at(0) += pre.red;
+        preSum.at(rowIndex).at(1) += pre.green;
+        preSum.at(rowIndex).at(2) += pre.blue;
+        ++used.at(rowIndex);
     }
     context->Unmap(slot.staging, 0);
     slot.hasPre = false;
     slot.hasPost = false;
-    if (used == 0) {
-        return;
-    }
 
-    // Integrate the observed on-screen difference into the water-side tint. Occluded
+    // Integrate the observed on-screen differences into the endpoint tints. Occluded
     // samples contribute zero (the band never drew there), so they only dilute the
     // gain, never bias the color.
-    for (int channel = 0; channel < 3; ++channel) {
-        const float error = errorSum.at(channel) / static_cast<float>(used);
-        const float reference = std::max(preSum.at(channel) / static_cast<float>(used), 0.05F);
-        auto& correction = s_waterCorrection.at(channel);
-        const float updated
-            = std::clamp(correction.load(std::memory_order_relaxed) + (K_MATCH_GAIN * error / reference), 0.25F, 1.75F);
-        correction.store(updated, std::memory_order_relaxed);
+    for (int rowIndex = 0; rowIndex < 2; ++rowIndex) {
+        if (used.at(rowIndex) == 0) {
+            continue;
+        }
+        const bool waterRow = rowIndex == 0;
+        auto& corrections = waterRow ? s_waterCorrection : s_skyCorrection;
+        const float gain = waterRow ? K_MATCH_GAIN_WATER : K_MATCH_GAIN_SKY;
+        const float clampMin = waterRow ? K_MATCH_WATER_MIN : K_MATCH_SKY_MIN;
+        const float clampMax = waterRow ? K_MATCH_WATER_MAX : K_MATCH_SKY_MAX;
+        for (int channel = 0; channel < 3; ++channel) {
+            const float error = errorSum.at(rowIndex).at(channel) / static_cast<float>(used.at(rowIndex));
+            const float reference
+                = std::max(preSum.at(rowIndex).at(channel) / static_cast<float>(used.at(rowIndex)), 0.05F);
+            auto& correction = corrections.at(channel);
+            const float updated = std::clamp(correction.load(std::memory_order_relaxed) + (gain * error / reference),
+                                             clampMin,
+                                             clampMax);
+            correction.store(updated, std::memory_order_relaxed);
+        }
+    }
+
+    // Periodic diagnostic so field reports carry the loop's state (roughly every 10s)
+    static std::uint32_t consumedCount = 0;
+    if (++consumedCount % 600 == 0) {
+        spdlog::info("Horizon blend match: water corr ({:.3f}, {:.3f}, {:.3f}) x{}, sky corr ({:.3f}, {:.3f}, "
+                     "{:.3f}) x{}",
+                     s_waterCorrection.at(0).load(std::memory_order_relaxed),
+                     s_waterCorrection.at(1).load(std::memory_order_relaxed),
+                     s_waterCorrection.at(2).load(std::memory_order_relaxed),
+                     used.at(0),
+                     s_skyCorrection.at(0).load(std::memory_order_relaxed),
+                     s_skyCorrection.at(1).load(std::memory_order_relaxed),
+                     s_skyCorrection.at(2).load(std::memory_order_relaxed),
+                     used.at(1));
     }
 }
 
@@ -926,8 +955,16 @@ void HorizonBand::updateFrame(const RE::NiCamera* camera)
 
     auto* const sky = RE::Sky::GetSingleton();
     if (sky != nullptr) {
-        const auto& horizon = sky->skyColor[RE::TESWeather::ColorTypes::kHorizon];
+        const auto& rawHorizon = sky->skyColor[RE::TESWeather::ColorTypes::kHorizon];
         const auto& rawFogFar = sky->skyColor[RE::TESWeather::ColorTypes::kFogFar];
+        // Both endpoint colors are only priors; each closed-loop correction trims its
+        // endpoint until the band renders exactly what the framebuffer showed beneath it
+        // - the sky side matters under CS Linear Lighting, whose per-surface gammas shade
+        // effect geometry differently from the sky dome
+        const RE::NiColor horizon {
+            std::clamp(rawHorizon.red * s_skyCorrection.at(0).load(std::memory_order_relaxed), 0.0F, 1.0F),
+            std::clamp(rawHorizon.green * s_skyCorrection.at(1).load(std::memory_order_relaxed), 0.0F, 1.0F),
+            std::clamp(rawHorizon.blue * s_skyCorrection.at(2).load(std::memory_order_relaxed), 0.0F, 1.0F)};
         // The fog-far color is only the PRIOR for the water side; the closed-loop
         // correction (see captureMatchSamples) trims it until the band renders exactly
         // what the framebuffer showed beneath it - whatever water mod or renderer

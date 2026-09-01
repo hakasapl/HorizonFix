@@ -88,21 +88,33 @@ private:
         s_arcTintStamps {}; /**< s_tintStamp value each arc's buffer was last written with */
     static inline RE::BSFixedString s_bandName; /**< Interned K_SHAPE_NAME for cheap per-pass comparison */
 
-    // Automatic water-side color matching. The fog-far tint is only a prior: what distant
-    // water ACTUALLY renders depends on the whole pipeline (fog clamp residuals, CS
-    // Unified Water, ENB, ...) and cannot be computed CPU-side. Instead the render hooks
-    // measure it: right before the band draws, the framebuffer under the band still shows
-    // pure water - that is the color to match; right after, it shows the band's blend.
-    // Small regions at a few horizon sample rays are copied around the band's draws into
-    // a staging ring, read back a few frames later (no GPU stall), and the per-channel
-    // difference feeds an integral correction on the water-side tint until the on-screen
-    // difference is zero. Rays occluded by closer geometry self-cancel: the depth test
-    // already kept the band from drawing there, so pre and post are identical.
-    static constexpr int K_MATCH_SAMPLES = 5; /**< Sample rays spread across the view's horizon */
+    // Automatic color matching of BOTH gradient endpoints. The fog-far and horizon tints
+    // are only priors: what the water and sky ACTUALLY render depends on the whole
+    // pipeline - fog clamp residuals, CS Unified Water, ENB, and per-surface transforms
+    // like CS Linear Lighting's gammas/multipliers, which shade effect geometry through
+    // different curves than sky and fog (field-observed as a stripe at the seam with LL
+    // enabled while the water-only loop matched). The render hooks measure reality
+    // instead: right before the band draws, the framebuffer under it still shows pure
+    // water below the seam and pure sky above - those are the colors to match; right
+    // after, it shows the band's blend. Small regions at sample rays on both rows are
+    // copied around the band's draws into a staging ring, read back a few frames later
+    // (no GPU stall), and the per-channel differences feed integral corrections on the
+    // water-side and sky-side tints until the on-screen difference is zero. Rays occluded
+    // by closer geometry self-cancel: the depth test already kept the band from drawing
+    // there, so pre and post are identical.
+    static constexpr int K_MATCH_SAMPLES = 5; /**< Sample rays per row, spread across the view's horizon */
+    static constexpr int K_MATCH_TOTAL = K_MATCH_SAMPLES * 2; /**< Water-row samples, then sky-row samples */
     static constexpr float K_MATCH_AZIMUTH_STEP = 20.0F; /**< Degrees between adjacent sample rays */
-    static constexpr float K_MATCH_ROW_T = -0.35F; /**< Band row parameter sampled: below the seam, alpha ~0.7 */
+    static constexpr float K_MATCH_ROW_T_WATER = -0.35F; /**< Water-row band parameter: below the seam, alpha ~0.7 */
+    static constexpr float K_MATCH_ROW_T_SKY = 0.35F; /**< Sky-row band parameter: above the seam, alpha ~0.7 */
     static constexpr int K_MATCH_RING = 4; /**< Staging slots in flight; reads lag captures by 3 frames */
-    static constexpr float K_MATCH_GAIN = 0.08F; /**< Per-frame integral gain of the correction */
+    static constexpr float K_MATCH_GAIN_WATER = 0.08F; /**< Per-frame integral gain, water endpoint */
+    static constexpr float K_MATCH_GAIN_SKY
+        = 0.04F; /**< Per-frame integral gain, sky endpoint (slower: its reference is noisier - clouds, sun glow) */
+    static constexpr float K_MATCH_WATER_MIN = 0.1F; /**< Water correction clamps (gamma-scale headroom for LL) */
+    static constexpr float K_MATCH_WATER_MAX = 3.0F;
+    static constexpr float K_MATCH_SKY_MIN = 0.5F; /**< Sky correction clamps (tighter: feeds the seam row's mix) */
+    static constexpr float K_MATCH_SKY_MAX = 2.0F;
 
     /**
      * @brief One in-flight capture: a K_MATCH_SAMPLES x 2 staging texture (row 0 = before
@@ -111,7 +123,7 @@ private:
     struct MatchSlot {
         REX::W32::ID3D11Texture2D* staging = nullptr; /**< Ref held by the slot */
         std::uint32_t frame = 0; /**< s_tintStamp value of the captures */
-        std::array<std::array<float, 2>, K_MATCH_SAMPLES>
+        std::array<std::array<float, 2>, K_MATCH_TOTAL>
             uv {}; /**< Snapshot of s_sampleUV at pre-capture, so pre, post, and readback
                       all use the same pixels even while the game thread moves the points */
         bool hasPre = false; /**< Row 0 holds this frame's pre-band copy */
@@ -121,11 +133,13 @@ private:
     static inline std::uint32_t s_matchFormat = 0; /**< DXGI format the staging textures match */
     static inline std::uint32_t s_matchCaptureFrame = 0; /**< Frame of the last pre-capture (render side only) */
     static inline bool s_matchDisabled = false; /**< Loop off for this session (VR, MSAA, exotic format) */
-    static inline std::array<std::array<float, 2>, K_MATCH_SAMPLES>
+    static inline std::array<std::array<float, 2>, K_MATCH_TOTAL>
         s_sampleUV {}; /**< Sample points in 0-1 viewport coordinates; x < 0 = invalid. Game side writes */
     static inline std::atomic<bool> s_samplesValid {false}; /**< Any sample point usable this frame */
     static inline std::array<std::atomic<float>, 3>
         s_waterCorrection {1.0F, 1.0F, 1.0F}; /**< Per-channel multiplier the loop applies to the fog-far tint */
+    static inline std::array<std::atomic<float>, 3>
+        s_skyCorrection {1.0F, 1.0F, 1.0F}; /**< Per-channel multiplier the loop applies to the horizon tint */
 
     /**
      * @brief Hook for BSEffectShader::SetupGeometry: refreshes a band arc's vertex-color
@@ -297,9 +311,10 @@ private:
      * @brief Projects the color-match sample points onto the screen (see MatchSlot)
      *
      * Runs game-side from updateFrame with the same camera the frame renders with. Sample
-     * rays fan out across the camera's horizontal forward at the band's radius, at a band
-     * row below the seam. Points behind the camera or outside the safe viewport region are
-     * marked invalid; VR disables the loop entirely (two eyes, one projection).
+     * rays fan out across the camera's horizontal forward at the band's radius, on two
+     * band rows: one below the seam (water reference) and one above it (sky reference).
+     * Points behind the camera or outside the safe viewport region are marked invalid;
+     * VR disables the loop entirely (two eyes, one projection).
      *
      * @param camera The world root camera
      * @param scale The band's world radius this frame
@@ -328,7 +343,7 @@ private:
      *
      * Render side, once per frame. Maps with DO_NOT_WAIT (a still-busy copy is simply
      * skipped), averages the per-channel pre/post difference over the valid samples, and
-     * integrates it into the correction with K_MATCH_GAIN.
+     * integrates it into the per-row corrections with their gains.
      *
      * @param frame The current frame stamp; the slot from frame - (K_MATCH_RING - 1) is read
      */
