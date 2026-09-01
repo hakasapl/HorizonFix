@@ -237,6 +237,18 @@ public:
      */
     static auto effectiveRadius() -> float;
 
+    /**
+     * @brief Decodes an IEEE 754 half-precision value (how vertex layouts without the
+     * full-precision flag store positions)
+     *
+     * Public because the horizon blend band's color matching also decodes half-precision
+     * render-target texels with it.
+     *
+     * @param half The 16-bit pattern to decode
+     * @return float The decoded value
+     */
+    static auto halfToFloat(std::uint16_t half) -> float;
+
 private:
     /**
      * @brief Extracts one column of a rotation matrix as a vector (a world-space basis axis)
@@ -338,15 +350,6 @@ private:
      * @return DonorCheck The verdict plus a short reason string for logging
      */
     static auto classifyDonor(const RE::BSTriShape* shape) -> DonorCheck;
-
-    /**
-     * @brief Decodes an IEEE 754 half-precision value (how vertex layouts without the
-     * full-precision flag store positions)
-     *
-     * @param half The 16-bit pattern to decode
-     * @return float The decoded value
-     */
-    static auto halfToFloat(std::uint16_t half) -> float;
 
     /**
      * @brief Rebuilds the per-frame picture of where the game's real water renders (s_nearWater)

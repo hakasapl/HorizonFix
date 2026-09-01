@@ -1,5 +1,6 @@
 #include "ConfigLoader.hpp"
 
+#include "HorizonBand.hpp"
 #include "SkirtCull.hpp"
 #include "SkirtDepth.hpp"
 #include "WaterSkirt.hpp"
@@ -49,6 +50,12 @@ void installHooks()
 {
     SkirtCull::AtmosphereUpdateHook::install();
     SkirtDepth::install();
+
+    // The horizon blend band's tint-refresh hook is only needed while the feature is on;
+    // disabled installs leave the effect shader untouched (config is loaded before this)
+    if (ConfigLoader::getHorizonBlendDegrees() > 0.0F) {
+        HorizonBand::installHooks();
+    }
 }
 
 /**

@@ -11,6 +11,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -46,6 +47,459 @@ static_assert(sizeof(RingVertex) == 24);
 constexpr std::uint64_t K_RING_VERTEX_DESC = (0x423ULL << 44U) | (5ULL << 24U) | (4ULL << 8U) | 6ULL;
 
 } // namespace
+
+auto HorizonBand::isBandPass(RE::BSRenderPass* passPtr) -> bool
+{
+    // The band is identified purely by the name the donor NIF gave it; BSFixedString
+    // comparison is a pointer compare, so this is cheap per pass
+    return (passPtr != nullptr) && (passPtr->geometry != nullptr) && passPtr->geometry->name == s_bandName;
+}
+
+auto HorizonBand::getContext() -> REX::W32::ID3D11DeviceContext*
+{
+    auto* const renderer = RE::BSGraphics::Renderer::GetSingleton();
+    return renderer != nullptr ? renderer->GetRuntimeData().context : nullptr;
+}
+
+void HorizonBand::refreshArcColors(RE::BSTriShape* arcShape,
+                                   std::size_t arcIndex)
+{
+    const std::uint32_t stamp = s_tintStamp.load(std::memory_order_acquire);
+    if (s_arcTintStamps.at(arcIndex) == stamp) {
+        return; // this arc's buffer already carries the current gradient
+    }
+
+    auto* const data = arcShape->GetGeometryRuntimeData().rendererData;
+    if (data == nullptr || data->rawVertexData == nullptr || data->vertexBuffer == nullptr) {
+        return;
+    }
+    auto* const context = getContext();
+    if (context == nullptr) {
+        return;
+    }
+
+    // Rewrite the RGB bytes in the CPU copy from the per-row gradient; the alpha byte
+    // keeps carrying the opacity profile untouched
+    constexpr std::uint32_t COLUMNS = (K_SEGMENTS / K_ARCS) + 1;
+    constexpr std::uint32_t VERTEX_COUNT = COLUMNS * K_ROWS;
+    const auto toByte = [](float channel) -> std::uint8_t {
+        return static_cast<std::uint8_t>(std::lround(std::clamp(channel, 0.0F, 1.0F) * 255.0F));
+    };
+    for (std::uint32_t vertex = 0; vertex < VERTEX_COUNT; ++vertex) {
+        const auto& rowColor = s_rowColors.at(vertex / COLUMNS);
+        std::uint8_t* const colorBytes = data->rawVertexData + (static_cast<std::size_t>(vertex) * sizeof(RingVertex))
+            + offsetof(RingVertex, rgba);
+        colorBytes[0] = toByte(rowColor.red);
+        colorBytes[1] = toByte(rowColor.green);
+        colorBytes[2] = toByte(rowColor.blue);
+    }
+
+    // Full-buffer discard upload; the buffer object identity is unchanged, so nothing
+    // downstream needs rebinding
+    auto* const buffer = reinterpret_cast<REX::W32::ID3D11Buffer*>(data->vertexBuffer);
+    REX::W32::D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (context->Map(buffer, 0, REX::W32::D3D11_MAP_WRITE_DISCARD, 0, &mapped) < 0 || mapped.data == nullptr) {
+        return;
+    }
+    std::memcpy(mapped.data, data->rawVertexData, static_cast<std::size_t>(VERTEX_COUNT) * sizeof(RingVertex));
+    context->Unmap(buffer, 0);
+    s_arcTintStamps.at(arcIndex) = stamp;
+}
+
+void HorizonBand::computeSampleUVs(const RE::NiCamera* camera,
+                                   float scale,
+                                   float bandZ,
+                                   float halfHeightWorld)
+{
+    // One projection cannot serve two VR eyes; the loop stands down there and the
+    // fog-far prior alone drives the water side
+    if (REL::Module::IsVR()) {
+        s_samplesValid.store(false, std::memory_order_release);
+        return;
+    }
+
+    const auto& world = camera->world;
+    const auto& frustum = camera->GetRuntimeData2().viewFrustum;
+    const RE::NiPoint3 forward {world.rotate.entry[0][0], world.rotate.entry[1][0], world.rotate.entry[2][0]};
+    const RE::NiPoint3 up {world.rotate.entry[0][1], world.rotate.entry[1][1], world.rotate.entry[2][1]};
+    const RE::NiPoint3 right {world.rotate.entry[0][2], world.rotate.entry[1][2], world.rotate.entry[2][2]};
+
+    const float horizontalWidth = frustum.fRight - frustum.fLeft;
+    const float verticalHeight = frustum.fTop - frustum.fBottom;
+    RE::NiPoint3 forwardHorizontal {forward.x, forward.y, 0.0F};
+    const float forwardLength = forwardHorizontal.Length();
+    bool anyValid = false;
+    if (frustum.bOrtho || horizontalWidth <= 0.0F || verticalHeight <= 0.0F || forwardLength < 0.05F) {
+        // Looking straight up/down (or an exotic camera): nothing sensible to sample
+        for (auto& sample : s_sampleUV) {
+            sample.at(0) = -1.0F;
+        }
+        s_samplesValid.store(false, std::memory_order_release);
+        return;
+    }
+    forwardHorizontal /= forwardLength;
+
+    // Rays fan out around the camera's horizontal heading; each hits the band ring at a
+    // row below the seam, inside the band's strong-alpha zone (K_MATCH_ROW_T)
+    const float sampleZOffset = (bandZ + (K_MATCH_ROW_T * halfHeightWorld)) - world.translate.z;
+    for (int i = 0; i < K_MATCH_SAMPLES; ++i) {
+        auto& sample = s_sampleUV.at(i);
+        sample.at(0) = -1.0F;
+        const float azimuth = static_cast<float>(i - ((K_MATCH_SAMPLES - 1) / 2)) * K_MATCH_AZIMUTH_STEP
+            * std::numbers::pi_v<float> / 180.0F;
+        const float sinAz = std::sin(azimuth);
+        const float cosAz = std::cos(azimuth);
+        const RE::NiPoint3 toSample {((cosAz * forwardHorizontal.x) - (sinAz * forwardHorizontal.y)) * scale,
+                                     ((sinAz * forwardHorizontal.x) + (cosAz * forwardHorizontal.y)) * scale,
+                                     sampleZOffset};
+        const float depth = toSample.Dot(forward);
+        if (depth < 1.0F) {
+            continue;
+        }
+        const float u = ((toSample.Dot(right) / depth) - frustum.fLeft) / horizontalWidth;
+        const float v = (frustum.fTop - (toSample.Dot(up) / depth)) / verticalHeight;
+        // Keep a safety margin from the viewport edges (dynamic resolution, TAA jitter)
+        constexpr float MARGIN = 0.03F;
+        if (u < MARGIN || u > 1.0F - MARGIN || v < MARGIN || v > 1.0F - MARGIN) {
+            continue;
+        }
+        sample.at(0) = u;
+        sample.at(1) = v;
+        anyValid = true;
+    }
+    s_samplesValid.store(anyValid, std::memory_order_release);
+}
+
+void HorizonBand::disableMatch(const char* reason)
+{
+    if (!s_matchDisabled) {
+        s_matchDisabled = true;
+        spdlog::info("Horizon blend color matching disabled: {} (keeping the fog-far tint as-is)", reason);
+    }
+}
+
+auto HorizonBand::texelSize(std::uint32_t format) -> std::uint32_t
+{
+    switch (format) {
+    case REX::W32::DXGI_FORMAT_R8G8B8A8_UNORM:
+    case REX::W32::DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case REX::W32::DXGI_FORMAT_B8G8R8A8_UNORM:
+    case REX::W32::DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+    case REX::W32::DXGI_FORMAT_R11G11B10_FLOAT:
+    case REX::W32::DXGI_FORMAT_R10G10B10A2_UNORM:
+        return 4;
+    case REX::W32::DXGI_FORMAT_R16G16B16A16_FLOAT:
+        return 8;
+    default:
+        return 0;
+    }
+}
+
+auto HorizonBand::decodeTexel(const std::uint8_t* texel,
+                              std::uint32_t format,
+                              RE::NiColor& out) -> bool
+{
+    // The loop only needs a consistent difference signal, so sRGB-encoded values are
+    // read as-is rather than linearized - the integral controller nulls the difference
+    // in whatever space both rows share
+    constexpr float BYTE_SCALE = 1.0F / 255.0F;
+    switch (format) {
+    case REX::W32::DXGI_FORMAT_R8G8B8A8_UNORM:
+    case REX::W32::DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        out = RE::NiColor {static_cast<float>(texel[0]) * BYTE_SCALE,
+                           static_cast<float>(texel[1]) * BYTE_SCALE,
+                           static_cast<float>(texel[2]) * BYTE_SCALE};
+        return true;
+    case REX::W32::DXGI_FORMAT_B8G8R8A8_UNORM:
+    case REX::W32::DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+        out = RE::NiColor {static_cast<float>(texel[2]) * BYTE_SCALE,
+                           static_cast<float>(texel[1]) * BYTE_SCALE,
+                           static_cast<float>(texel[0]) * BYTE_SCALE};
+        return true;
+    case REX::W32::DXGI_FORMAT_R16G16B16A16_FLOAT: {
+        std::array<std::uint16_t, 3> halves {};
+        std::memcpy(halves.data(), texel, sizeof(halves));
+        out = RE::NiColor {WaterSkirt::halfToFloat(halves.at(0)),
+                           WaterSkirt::halfToFloat(halves.at(1)),
+                           WaterSkirt::halfToFloat(halves.at(2))};
+        return true;
+    }
+    case REX::W32::DXGI_FORMAT_R11G11B10_FLOAT: {
+        std::uint32_t packed = 0;
+        std::memcpy(&packed, texel, sizeof(packed));
+        // 5-bit exponent (bias 15) with 6/6/5-bit mantissas, no sign
+        const auto decodeSmallFloat = [](std::uint32_t bits, std::uint32_t mantissaBits) -> float {
+            const std::uint32_t mantissaMask = (1U << mantissaBits) - 1U;
+            const auto exponent = static_cast<std::int32_t>((bits >> mantissaBits) & 0x1FU);
+            const float mantissa = static_cast<float>(bits & mantissaMask) / static_cast<float>(1U << mantissaBits);
+            if (exponent == 0) {
+                return mantissa * std::exp2(-14.0F);
+            }
+            if (exponent == 31) {
+                return 0.0F; // treat inf/NaN as no signal
+            }
+            return (1.0F + mantissa) * std::exp2(static_cast<float>(exponent - 15));
+        };
+        out = RE::NiColor {decodeSmallFloat(packed & 0x7FFU, 6),
+                           decodeSmallFloat((packed >> 11U) & 0x7FFU, 6),
+                           decodeSmallFloat((packed >> 22U) & 0x3FFU, 5)};
+        return true;
+    }
+    case REX::W32::DXGI_FORMAT_R10G10B10A2_UNORM: {
+        std::uint32_t packed = 0;
+        std::memcpy(&packed, texel, sizeof(packed));
+        constexpr float TEN_BIT_SCALE = 1.0F / 1023.0F;
+        out = RE::NiColor {static_cast<float>(packed & 0x3FFU) * TEN_BIT_SCALE,
+                           static_cast<float>((packed >> 10U) & 0x3FFU) * TEN_BIT_SCALE,
+                           static_cast<float>((packed >> 20U) & 0x3FFU) * TEN_BIT_SCALE};
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+void HorizonBand::captureMatchSamples(bool post)
+{
+    if (s_matchDisabled || !s_samplesValid.load(std::memory_order_acquire)) {
+        return;
+    }
+    auto* const context = getContext();
+    if (context == nullptr) {
+        return;
+    }
+
+    // The render target bound for this band draw is where the water (and afterwards the
+    // band) pixels live
+    REX::W32::ID3D11RenderTargetView* rtv = nullptr;
+    context->OMGetRenderTargets(1, &rtv, nullptr);
+    if (rtv == nullptr) {
+        return;
+    }
+    REX::W32::ID3D11Resource* resource = nullptr;
+    rtv->GetResource(&resource);
+    rtv->Release();
+    if (resource == nullptr) {
+        return;
+    }
+    auto* const sourceTexture = reinterpret_cast<REX::W32::ID3D11Texture2D*>(resource);
+    REX::W32::D3D11_TEXTURE2D_DESC sourceDesc {};
+    sourceTexture->GetDesc(&sourceDesc);
+
+    // Auxiliary renders (cubemap faces and other small targets) are skipped, not
+    // disabled; MSAA cannot be region-copied to staging and disables the loop
+    if (sourceDesc.sampleDesc.count > 1) {
+        disableMatch("multisampled render target");
+        resource->Release();
+        return;
+    }
+    if (sourceDesc.width < 1000) {
+        resource->Release();
+        return;
+    }
+    if (texelSize(static_cast<std::uint32_t>(sourceDesc.format)) == 0) {
+        disableMatch("unsupported render target format");
+        resource->Release();
+        return;
+    }
+
+    // Recreate the staging ring when the render target format changes
+    if (s_matchFormat != static_cast<std::uint32_t>(sourceDesc.format)) {
+        for (auto& staleSlot : s_matchSlots) {
+            if (staleSlot.staging != nullptr) {
+                staleSlot.staging->Release();
+            }
+            staleSlot = MatchSlot {};
+        }
+        s_matchFormat = static_cast<std::uint32_t>(sourceDesc.format);
+    }
+
+    const std::uint32_t frame = s_matchCaptureFrame;
+    auto& slot = s_matchSlots.at(frame % K_MATCH_RING);
+    if (post && (slot.frame != frame || !slot.hasPre)) {
+        resource->Release();
+        return; // no pre capture to pair with this frame
+    }
+    if (slot.staging == nullptr) {
+        auto* const device = RE::BSGraphics::Renderer::GetDevice();
+        if (device == nullptr) {
+            resource->Release();
+            return;
+        }
+        REX::W32::D3D11_TEXTURE2D_DESC stagingDesc {};
+        stagingDesc.width = K_MATCH_SAMPLES;
+        stagingDesc.height = 2;
+        stagingDesc.mipLevels = 1;
+        stagingDesc.arraySize = 1;
+        stagingDesc.format = sourceDesc.format;
+        stagingDesc.sampleDesc.count = 1;
+        stagingDesc.usage = REX::W32::D3D11_USAGE_STAGING;
+        stagingDesc.cpuAccessFlags = REX::W32::D3D11_CPU_ACCESS_READ;
+        if (device->CreateTexture2D(&stagingDesc, nullptr, &slot.staging) < 0 || slot.staging == nullptr) {
+            slot.staging = nullptr;
+            resource->Release();
+            return;
+        }
+    }
+
+    // Viewport-relative pixel coordinates handle dynamic resolution
+    std::uint32_t viewportCount = 1;
+    REX::W32::D3D11_VIEWPORT viewport {};
+    context->RSGetViewports(&viewportCount, &viewport);
+    if (viewportCount == 0 || viewport.width < 1.0F || viewport.height < 1.0F) {
+        resource->Release();
+        return;
+    }
+
+    if (!post) {
+        slot.uv = s_sampleUV; // freeze the points for this capture pair and its readback
+    }
+    for (int i = 0; i < K_MATCH_SAMPLES; ++i) {
+        const float u = slot.uv.at(i).at(0);
+        const float v = slot.uv.at(i).at(1);
+        if (u < 0.0F) {
+            continue;
+        }
+        const auto px = static_cast<std::uint32_t>(
+            std::clamp(viewport.topLeftX + (u * viewport.width), viewport.topLeftX, viewport.topLeftX + viewport.width - 1.0F));
+        const auto py = static_cast<std::uint32_t>(
+            std::clamp(viewport.topLeftY + (v * viewport.height), viewport.topLeftY, viewport.topLeftY + viewport.height - 1.0F));
+        const REX::W32::D3D11_BOX box {px, py, 0, px + 1, py + 1, 1};
+        context->CopySubresourceRegion(
+            slot.staging, 0, static_cast<std::uint32_t>(i), post ? 1 : 0, 0, resource, 0, &box);
+    }
+    if (post) {
+        slot.hasPost = true;
+    } else {
+        slot.frame = frame;
+        slot.hasPre = true;
+        slot.hasPost = false;
+    }
+    resource->Release();
+}
+
+void HorizonBand::consumeMatchSlot(std::uint32_t frame)
+{
+    if (s_matchDisabled) {
+        return;
+    }
+    // The slot the ring is about to recycle next frame is the oldest completed capture
+    auto& slot = s_matchSlots.at((frame + 1) % K_MATCH_RING);
+    if (slot.staging == nullptr || !slot.hasPre || !slot.hasPost
+        || slot.frame != frame - (K_MATCH_RING - 1)) {
+        return;
+    }
+    auto* const context = getContext();
+    if (context == nullptr) {
+        return;
+    }
+
+    // The copy is K_MATCH_RING-1 frames old, so this map should never block; if the GPU
+    // is somehow still busy, skip rather than stall the frame
+    REX::W32::D3D11_MAPPED_SUBRESOURCE mapped {};
+    if (context->Map(slot.staging, 0, REX::W32::D3D11_MAP_READ, REX::W32::D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped) < 0
+        || mapped.data == nullptr) {
+        return;
+    }
+
+    const std::uint32_t stride = texelSize(s_matchFormat);
+    const auto* const preRow = static_cast<const std::uint8_t*>(mapped.data);
+    const auto* const postRow = preRow + mapped.rowPitch;
+    std::array<float, 3> errorSum {};
+    std::array<float, 3> preSum {};
+    int used = 0;
+    for (int i = 0; i < K_MATCH_SAMPLES; ++i) {
+        if (slot.uv.at(i).at(0) < 0.0F) {
+            continue;
+        }
+        RE::NiColor pre;
+        RE::NiColor postColor;
+        if (!decodeTexel(preRow + (static_cast<std::size_t>(i) * stride), s_matchFormat, pre)
+            || !decodeTexel(postRow + (static_cast<std::size_t>(i) * stride), s_matchFormat, postColor)) {
+            continue;
+        }
+        errorSum.at(0) += pre.red - postColor.red;
+        errorSum.at(1) += pre.green - postColor.green;
+        errorSum.at(2) += pre.blue - postColor.blue;
+        preSum.at(0) += pre.red;
+        preSum.at(1) += pre.green;
+        preSum.at(2) += pre.blue;
+        ++used;
+    }
+    context->Unmap(slot.staging, 0);
+    slot.hasPre = false;
+    slot.hasPost = false;
+    if (used == 0) {
+        return;
+    }
+
+    // Integrate the observed on-screen difference into the water-side tint. Occluded
+    // samples contribute zero (the band never drew there), so they only dilute the
+    // gain, never bias the color.
+    for (int channel = 0; channel < 3; ++channel) {
+        const float error = errorSum.at(channel) / static_cast<float>(used);
+        const float reference = std::max(preSum.at(channel) / static_cast<float>(used), 0.05F);
+        auto& correction = s_waterCorrection.at(channel);
+        const float updated
+            = std::clamp(correction.load(std::memory_order_relaxed) + (K_MATCH_GAIN * error / reference), 0.25F, 1.75F);
+        correction.store(updated, std::memory_order_relaxed);
+    }
+}
+
+void HorizonBand::SetupGeometryHook::thunk(RE::BSShader* shaderPtr,
+                                           RE::BSRenderPass* passPtr,
+                                           std::uint32_t renderFlags)
+{
+    // Let the effect shader do its normal per-geometry setup first
+    s_func(shaderPtr, passPtr, renderFlags);
+
+    // Only band passes get the special handling; every other effect pass is untouched.
+    // Done here rather than in updateFrame because mapping GPU resources must happen on
+    // the thread that owns the D3D context - the thread this hook runs on.
+    if (!isBandPass(passPtr)) {
+        return;
+    }
+    for (std::size_t i = 0; i < s_arcs.size(); ++i) {
+        if (s_arcs[i].get() == passPtr->geometry) {
+            refreshArcColors(s_arcs[i].get(), i);
+            break;
+        }
+    }
+
+    // Once per frame, before the first band arc draws: the framebuffer still shows pure
+    // water under the band - capture it, and harvest the capture pair from 3 frames ago
+    const std::uint32_t frame = s_tintStamp.load(std::memory_order_acquire);
+    if (frame != s_matchCaptureFrame) {
+        s_matchCaptureFrame = frame;
+        captureMatchSamples(false);
+        consumeMatchSlot(frame);
+    }
+}
+
+void HorizonBand::RestoreGeometryHook::thunk(RE::BSShader* shaderPtr,
+                                             RE::BSRenderPass* passPtr,
+                                             std::uint32_t renderFlags)
+{
+    // After a band arc drew, the framebuffer shows the band's blend at the sample
+    // points; every arc overwrites the row, so the last arc's state wins
+    if (isBandPass(passPtr)) {
+        captureMatchSamples(true);
+    }
+    s_func(shaderPtr, passPtr, renderFlags);
+}
+
+void HorizonBand::installHooks()
+{
+    // Intern the band name once so isBandPass can compare by pointer
+    s_bandName = K_SHAPE_NAME;
+
+    REL::Relocation<std::uintptr_t> vtbl {RE::VTABLE_BSEffectShader.at(0)};
+    SetupGeometryHook::s_func = vtbl.write_vfunc(SetupGeometryHook::K_INDEX, SetupGeometryHook::thunk);
+    RestoreGeometryHook::s_func = vtbl.write_vfunc(RestoreGeometryHook::K_INDEX, RestoreGeometryHook::thunk);
+
+    spdlog::info("Hooked BSEffectShader::SetupGeometry/RestoreGeometry for the horizon band tint (vtable {:#x})",
+                 vtbl.address());
+}
 
 auto HorizonBand::floatToHalf(float value) -> std::uint16_t
 {
@@ -184,11 +638,14 @@ auto HorizonBand::buildArcGeometry(int arcIndex,
     std::memcpy(rawVerts, vertices.data(), vertexBytes);
     std::memcpy(rawIndices, indices.data(), indexBytes);
 
-    // GPU side: immutable buffers seeded from the CPU copies
+    // GPU side, seeded from the CPU copies. The vertex buffer is DYNAMIC because the
+    // per-row tint gradient rewrites the vertex colors as the sky changes
+    // (refreshArcColors); the index buffer never changes.
     REX::W32::D3D11_BUFFER_DESC vertexBufferDesc {};
     vertexBufferDesc.byteWidth = static_cast<std::uint32_t>(vertexBytes);
-    vertexBufferDesc.usage = REX::W32::D3D11_USAGE_IMMUTABLE;
+    vertexBufferDesc.usage = REX::W32::D3D11_USAGE_DYNAMIC;
     vertexBufferDesc.bindFlags = REX::W32::D3D11_BIND_VERTEX_BUFFER;
+    vertexBufferDesc.cpuAccessFlags = REX::W32::D3D11_CPU_ACCESS_WRITE;
     REX::W32::D3D11_SUBRESOURCE_DATA vertexInit {};
     vertexInit.sysMem = rawVerts;
 
@@ -365,7 +822,7 @@ auto HorizonBand::loadModel() -> bool
                 spdlog::warn("Horizon blend disabled: cloning arc {} failed", arc);
                 return false;
             }
-            // Same name on every arc so the ring reads as one object in scene dumps
+            // Same interned name on every arc so the tint-refresh hook matches them all
             target->name = K_SHAPE_NAME;
             model->AttachChild(target, true);
         }
@@ -457,29 +914,48 @@ void HorizonBand::updateFrame(const RE::NiCamera* camera)
     RE::NiUpdateData updateData {};
     s_model->Update(updateData);
 
-    // Re-tint from the sky's live horizon color: this is what makes the blend weather-mod
-    // independent - whatever fed the sky this frame (any weather mod, transition, time of
-    // day) is what the water fades into. Every arc carries its own material (see s_arcs),
-    // so the tint is written into each.
+    // Re-tint from the live sky: this is what makes the blend weather-mod independent -
+    // whatever fed the sky this frame (any weather mod, transition, time of day) is what
+    // the water fades into. Two colors, not one: distant water converges to the FOG FAR
+    // color as its fog saturates (vanilla and CS Unified Water alike) while the sky at
+    // the seam shows the HORIZON color, so the band's rows gradient from one to the
+    // other across the seam (see s_rowColors). The actual vertex rewrite happens in the
+    // render hook; here only the targets are computed.
+    // Keep the color-match sample points tracking this frame's camera and band placement
+    computeSampleUVs(camera, scale, cameraPos.z - seamDrop, scale * std::tan(radians));
+
     auto* const sky = RE::Sky::GetSingleton();
     if (sky != nullptr) {
         const auto& horizon = sky->skyColor[RE::TESWeather::ColorTypes::kHorizon];
-        const RE::NiColorA tint {horizon.red, horizon.green, horizon.blue, 1.0F};
-        for (const auto& arcShape : s_arcs) {
-            auto* const property
-                = static_cast<RE::BSEffectShaderProperty*>(arcShape->GetGeometryRuntimeData().shaderProperty.get());
-            auto* const material = property != nullptr ? property->GetMaterial() : nullptr;
-            if (material != nullptr) {
-                material->baseColor = tint;
-            }
+        const auto& rawFogFar = sky->skyColor[RE::TESWeather::ColorTypes::kFogFar];
+        // The fog-far color is only the PRIOR for the water side; the closed-loop
+        // correction (see captureMatchSamples) trims it until the band renders exactly
+        // what the framebuffer showed beneath it - whatever water mod or renderer
+        // produced that color
+        const RE::NiColor fogFar {
+            std::clamp(rawFogFar.red * s_waterCorrection.at(0).load(std::memory_order_relaxed), 0.0F, 1.0F),
+            std::clamp(rawFogFar.green * s_waterCorrection.at(1).load(std::memory_order_relaxed), 0.0F, 1.0F),
+            std::clamp(rawFogFar.blue * s_waterCorrection.at(2).load(std::memory_order_relaxed), 0.0F, 1.0F)};
+        for (int row = 0; row < K_ROWS; ++row) {
+            // Crossfade over the middle third of the band: pure fog-far color below,
+            // pure horizon color above, smoothstepped through the seam row
+            const float t = (2.0F * static_cast<float>(row) / (K_ROWS - 1)) - 1.0F;
+            constexpr float CROSSFADE_HALF_WIDTH = 1.0F / 3.0F;
+            const float x = std::clamp((t + CROSSFADE_HALF_WIDTH) / (2.0F * CROSSFADE_HALF_WIDTH), 0.0F, 1.0F);
+            const float w = x * x * (3.0F - (2.0F * x));
+            s_rowColors.at(row) = RE::NiColor {((1.0F - w) * fogFar.red) + (w * horizon.red),
+                                               ((1.0F - w) * fogFar.green) + (w * horizon.green),
+                                               ((1.0F - w) * fogFar.blue) + (w * horizon.blue)};
         }
+        s_tintStamp.fetch_add(1, std::memory_order_release);
     }
 
     if (!s_loggedFirstFrame && sky != nullptr) {
         s_loggedFirstFrame = true;
         const auto& horizonColor = sky->skyColor[RE::TESWeather::ColorTypes::kHorizon];
+        const auto& fogFarColor = sky->skyColor[RE::TESWeather::ColorTypes::kFogFar];
         spdlog::info("Horizon blend band first frame: far clip {}, world radius {}, camera Z {}, waterline Z {}, "
-                     "seam drop {}, horizon color ({}, {}, {})",
+                     "seam drop {}, horizon color ({}, {}, {}), fog far color ({}, {}, {})",
                      farClip,
                      scale,
                      cameraPos.z,
@@ -487,6 +963,9 @@ void HorizonBand::updateFrame(const RE::NiCamera* camera)
                      seamDrop,
                      horizonColor.red,
                      horizonColor.green,
-                     horizonColor.blue);
+                     horizonColor.blue,
+                     fogFarColor.red,
+                     fogFarColor.green,
+                     fogFarColor.blue);
     }
 }

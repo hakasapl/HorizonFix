@@ -2,6 +2,9 @@
 
 #include "PCH.h"
 
+#include <array>
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -67,7 +70,99 @@ private:
     static inline bool s_loadFailed = false; /**< Donor NIF failed to load; stop retrying for this session */
     static inline bool s_loggedFirstFrame = false; /**< One-shot diagnostic log on the first frame update */
 
+    // Per-row tint gradient, refreshed each frame from the live sky. The rows below the
+    // waterline take the FOG FAR color - what distant water converges to as its fog
+    // saturates, in vanilla and under CS Unified Water alike - and the rows above take
+    // the HORIZON color the sky shows at the seam, crossfading through the middle rows.
+    // A single horizon tint left the band's water side mismatched against water whose
+    // convergence color differs from the sky (glaring under Unified Water; the direction
+    // chosen is to match the band to the water, never to re-tint the water). The colors
+    // ride the vertex colors of a DYNAMIC vertex buffer: updateFrame (game side) computes
+    // s_rowColors and bumps s_tintStamp; the SetupGeometry hook (context-owning thread,
+    // the only place mapping the buffer is safe) rewrites each arc's buffer when its
+    // stamp is stale. A torn read of a color float costs at most one frame of an
+    // imperceptibly wrong hue, so only the stamp itself is atomic.
+    static inline std::array<RE::NiColor, K_ROWS> s_rowColors {}; /**< Row tints, bottom row first */
+    static inline std::atomic<std::uint32_t> s_tintStamp {0}; /**< Bumped when s_rowColors changes */
+    static inline std::array<std::uint32_t, K_ARCS>
+        s_arcTintStamps {}; /**< s_tintStamp value each arc's buffer was last written with */
+    static inline RE::BSFixedString s_bandName; /**< Interned K_SHAPE_NAME for cheap per-pass comparison */
+
+    // Automatic water-side color matching. The fog-far tint is only a prior: what distant
+    // water ACTUALLY renders depends on the whole pipeline (fog clamp residuals, CS
+    // Unified Water, ENB, ...) and cannot be computed CPU-side. Instead the render hooks
+    // measure it: right before the band draws, the framebuffer under the band still shows
+    // pure water - that is the color to match; right after, it shows the band's blend.
+    // Small regions at a few horizon sample rays are copied around the band's draws into
+    // a staging ring, read back a few frames later (no GPU stall), and the per-channel
+    // difference feeds an integral correction on the water-side tint until the on-screen
+    // difference is zero. Rays occluded by closer geometry self-cancel: the depth test
+    // already kept the band from drawing there, so pre and post are identical.
+    static constexpr int K_MATCH_SAMPLES = 5; /**< Sample rays spread across the view's horizon */
+    static constexpr float K_MATCH_AZIMUTH_STEP = 20.0F; /**< Degrees between adjacent sample rays */
+    static constexpr float K_MATCH_ROW_T = -0.35F; /**< Band row parameter sampled: below the seam, alpha ~0.7 */
+    static constexpr int K_MATCH_RING = 4; /**< Staging slots in flight; reads lag captures by 3 frames */
+    static constexpr float K_MATCH_GAIN = 0.08F; /**< Per-frame integral gain of the correction */
+
+    /**
+     * @brief One in-flight capture: a K_MATCH_SAMPLES x 2 staging texture (row 0 = before
+     * the band drew, row 1 = after) tagged with the frame it belongs to
+     */
+    struct MatchSlot {
+        REX::W32::ID3D11Texture2D* staging = nullptr; /**< Ref held by the slot */
+        std::uint32_t frame = 0; /**< s_tintStamp value of the captures */
+        std::array<std::array<float, 2>, K_MATCH_SAMPLES>
+            uv {}; /**< Snapshot of s_sampleUV at pre-capture, so pre, post, and readback
+                      all use the same pixels even while the game thread moves the points */
+        bool hasPre = false; /**< Row 0 holds this frame's pre-band copy */
+        bool hasPost = false; /**< Row 1 holds this frame's post-band copy */
+    };
+    static inline std::array<MatchSlot, K_MATCH_RING> s_matchSlots {};
+    static inline std::uint32_t s_matchFormat = 0; /**< DXGI format the staging textures match */
+    static inline std::uint32_t s_matchCaptureFrame = 0; /**< Frame of the last pre-capture (render side only) */
+    static inline bool s_matchDisabled = false; /**< Loop off for this session (VR, MSAA, exotic format) */
+    static inline std::array<std::array<float, 2>, K_MATCH_SAMPLES>
+        s_sampleUV {}; /**< Sample points in 0-1 viewport coordinates; x < 0 = invalid. Game side writes */
+    static inline std::atomic<bool> s_samplesValid {false}; /**< Any sample point usable this frame */
+    static inline std::array<std::atomic<float>, 3>
+        s_waterCorrection {1.0F, 1.0F, 1.0F}; /**< Per-channel multiplier the loop applies to the fog-far tint */
+
+    /**
+     * @brief Hook for BSEffectShader::SetupGeometry: refreshes a band arc's vertex-color
+     * gradient and captures the pre-band framebuffer samples before it draws (see
+     * s_rowColors and MatchSlot); every other effect pass is untouched
+     */
+    struct SetupGeometryHook {
+        static void thunk(RE::BSShader* shaderPtr,
+                          RE::BSRenderPass* passPtr,
+                          std::uint32_t renderFlags);
+
+        static inline REL::Relocation<decltype(thunk)> s_func; /**< Original function, called by the thunk */
+        static constexpr std::size_t K_INDEX = 0x6; // BSShader::SetupGeometry
+    };
+
+    /**
+     * @brief Hook for BSEffectShader::RestoreGeometry: captures the post-band framebuffer
+     * samples after a band arc drew (the last arc's capture wins; see MatchSlot)
+     */
+    struct RestoreGeometryHook {
+        static void thunk(RE::BSShader* shaderPtr,
+                          RE::BSRenderPass* passPtr,
+                          std::uint32_t renderFlags);
+
+        static inline REL::Relocation<decltype(thunk)> s_func; /**< Original function, called by the thunk */
+        static constexpr std::size_t K_INDEX = 0x7; // BSShader::RestoreGeometry
+    };
+
 public:
+    /**
+     * @brief Installs the vertex-color refresh hook on the BSEffectShader vtable
+     *
+     * Called at plugin load, only when fHorizonBlendDegrees > 0 - a disabled feature
+     * leaves the effect shader untouched.
+     */
+    static void installHooks();
+
     /**
      * @brief Builds and attaches the band, or re-attaches it after a skirt rebuild
      *
@@ -169,6 +264,105 @@ private:
      * @return std::uint16_t The half bit pattern
      */
     static auto floatToHalf(float value) -> std::uint16_t;
+
+    /**
+     * @brief Whether a render pass draws the band (matched by geometry name)
+     *
+     * @param passPtr Render pass to inspect
+     * @return bool True if the pass geometry is the band
+     */
+    static auto isBandPass(RE::BSRenderPass* passPtr) -> bool;
+
+    /**
+     * @brief Rewrites one arc's vertex colors from s_rowColors (see the gradient comment)
+     *
+     * Runs from the SetupGeometry hook on the thread that owns the D3D context: rewrites
+     * the RGB bytes of the CPU vertex copy (alpha profile untouched) and uploads the whole
+     * buffer with a discard map. No-op while the arc's stamp matches s_tintStamp.
+     *
+     * @param arcShape The arc whose pass is being set up
+     * @param arcIndex Index of the arc in s_arcs (for the per-arc stamp)
+     */
+    static void refreshArcColors(RE::BSTriShape* arcShape,
+                                 std::size_t arcIndex);
+
+    /**
+     * @brief Get the renderer's immediate D3D11 device context
+     *
+     * @return REX::W32::ID3D11DeviceContext* The context, or nullptr if the renderer is not up
+     */
+    static auto getContext() -> REX::W32::ID3D11DeviceContext*;
+
+    /**
+     * @brief Projects the color-match sample points onto the screen (see MatchSlot)
+     *
+     * Runs game-side from updateFrame with the same camera the frame renders with. Sample
+     * rays fan out across the camera's horizontal forward at the band's radius, at a band
+     * row below the seam. Points behind the camera or outside the safe viewport region are
+     * marked invalid; VR disables the loop entirely (two eyes, one projection).
+     *
+     * @param camera The world root camera
+     * @param scale The band's world radius this frame
+     * @param bandZ World Z of the band's center (seam) line
+     * @param halfHeightWorld The band's world half-height this frame
+     */
+    static void computeSampleUVs(const RE::NiCamera* camera,
+                                 float scale,
+                                 float bandZ,
+                                 float halfHeightWorld);
+
+    /**
+     * @brief Copies the framebuffer at the sample points into this frame's staging slot
+     *
+     * Render side. Pre-band captures (post = false) start a slot for s_matchCaptureFrame;
+     * post-band captures fill its second row and only run when the pre capture happened.
+     * Auxiliary renders (cubemap faces) are skipped by size; MSAA or an undecodable format
+     * disables the loop for the session.
+     *
+     * @param post False before the band draws (row 0), true after (row 1)
+     */
+    static void captureMatchSamples(bool post);
+
+    /**
+     * @brief Reads back the oldest completed staging slot and updates s_waterCorrection
+     *
+     * Render side, once per frame. Maps with DO_NOT_WAIT (a still-busy copy is simply
+     * skipped), averages the per-channel pre/post difference over the valid samples, and
+     * integrates it into the correction with K_MATCH_GAIN.
+     *
+     * @param frame The current frame stamp; the slot from frame - (K_MATCH_RING - 1) is read
+     */
+    static void consumeMatchSlot(std::uint32_t frame);
+
+    /**
+     * @brief Decodes one texel of a supported render-target format to RGB
+     *
+     * @param texel Pointer to the texel bytes
+     * @param format DXGI format of the texture
+     * @param out Receives the decoded color
+     * @return bool False when the format is not supported
+     */
+    static auto decodeTexel(const std::uint8_t* texel,
+                            std::uint32_t format,
+                            RE::NiColor& out) -> bool;
+
+    /**
+     * @brief Bytes per texel of a supported format, or 0 when unsupported
+     *
+     * @param format DXGI format to look up
+     * @return std::uint32_t The texel size in bytes
+     */
+    static auto texelSize(std::uint32_t format) -> std::uint32_t;
+
+    /**
+     * @brief Permanently disables the color-match loop for this session (logged once)
+     *
+     * The correction freezes at its current value; the gradient keeps working on the
+     * fog-far prior alone.
+     *
+     * @param reason Short reason for the log
+     */
+    static void disableMatch(const char* reason);
 };
 
 } // namespace HorizonFix
