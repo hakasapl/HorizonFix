@@ -559,6 +559,7 @@ void HorizonBand::releaseGeometryData(RE::BSGraphics::TriShape* dataPtr)
 
 auto HorizonBand::buildArcGeometry(int arcIndex,
                                    float blendDegrees,
+                                   float opaqueFraction,
                                    RE::NiBound& boundOut) -> RE::BSGraphics::TriShape*
 {
     auto* const device = RE::BSGraphics::Renderer::GetDevice();
@@ -585,13 +586,38 @@ auto HorizonBand::buildArcGeometry(int arcIndex,
                          std::numeric_limits<float>::lowest()};
     std::vector<RingVertex> vertices;
     vertices.reserve(VERTEX_COUNT);
+    // Row placement and alpha profile. The row parameter t runs from -1 (bottom rim) to +1
+    // (top rim) with the center row exactly on the seam (t = 0). Below the seam the rows
+    // are uniform and the alpha smoothsteps from 0 at the rim to 1 at the seam: the band
+    // there paints the far water's color over nearer, less fogged water, and that soft
+    // fade-in is what keeps its lower edge from drawing a line of its own. Above the seam
+    // the alpha stays at 1 up to the configured share of the upper half (so a thin bright
+    // sky strip sitting right on the horizon line is covered outright), then smoothsteps
+    // to 0 at the top rim over the remaining height. With a plateau the upper rows are
+    // re-spaced so one row lands exactly on the plateau's end and the rest resolve the
+    // fade; without one they stay uniform like the lower half.
+    constexpr std::uint32_t SEAM_ROW = (K_ROWS - 1) / 2;
+    constexpr std::uint32_t UPPER_ROWS = K_ROWS - 1 - SEAM_ROW; // rows strictly above the seam
+    const float plateau = std::clamp(opaqueFraction, 0.0F, 1.0F);
+    const auto smoothstep = [](float x) -> float { return x * x * (3.0F - (2.0F * x)); };
     for (std::uint32_t row = 0; row < K_ROWS; ++row) {
-        // Row parameter from -1 (bottom rim) to +1 (top rim); the alpha gradient is a
-        // smoothstep of the distance from the rims, peaking fully opaque at the center
-        // row so the seam is completely covered
-        const float t = (2.0F * static_cast<float>(row) / (K_ROWS - 1)) - 1.0F;
-        const float rimDistance = 1.0F - std::fabs(t);
-        const float alpha = rimDistance * rimDistance * (3.0F - (2.0F * rimDistance));
+        float t = 0.0F;
+        float alpha = 1.0F;
+        if (row <= SEAM_ROW) {
+            t = (static_cast<float>(row) / static_cast<float>(SEAM_ROW)) - 1.0F;
+            alpha = smoothstep(1.0F + t);
+        } else {
+            const std::uint32_t k = row - SEAM_ROW; // 1 .. UPPER_ROWS
+            if (plateau <= 0.0F) {
+                t = static_cast<float>(k) / static_cast<float>(UPPER_ROWS);
+            } else if (k == 1) {
+                t = plateau; // the plateau's end, still fully opaque
+            } else {
+                t = plateau + ((1.0F - plateau) * static_cast<float>(k - 1) / static_cast<float>(UPPER_ROWS - 1));
+            }
+            const float fadeHeight = 1.0F - plateau;
+            alpha = (t <= plateau || fadeHeight <= 0.0F) ? 1.0F : smoothstep((1.0F - t) / fadeHeight);
+        }
         const auto alphaByte = static_cast<std::uint8_t>(std::lround(alpha * 255.0F));
         for (std::uint32_t column = 0; column < COLUMNS; ++column) {
             const auto ringColumn = (static_cast<std::uint32_t>(arcIndex) * ARC_SEGMENTS) + column;
@@ -809,10 +835,11 @@ auto HorizonBand::loadModel() -> bool
     // individually - configuring only the donor left the clones on the raw NIF material,
     // which showed as per-segment color seams.
     const float degrees = ConfigLoader::getHorizonBlendDegrees();
+    const float opaquePercent = ConfigLoader::getHorizonBlendOpaquePercent();
     s_arcs.clear();
     for (int arc = 0; arc < K_ARCS; ++arc) {
         RE::NiBound bound {};
-        auto* const arcData = buildArcGeometry(arc, degrees, bound);
+        auto* const arcData = buildArcGeometry(arc, degrees, opaquePercent / 100.0F, bound);
         if (arcData == nullptr) {
             s_arcs.clear();
             s_loadFailed = true;
@@ -851,8 +878,10 @@ auto HorizonBand::loadModel() -> bool
         configureArc(arcShape.get());
     }
 
-    spdlog::info("Horizon blend band built: {} degrees, {} arcs x {} segments x {} rows, rim at {} of far clip",
+    spdlog::info("Horizon blend band built: {} degrees, {}% opaque above the seam, {} arcs x {} segments x {} rows, "
+                 "rim at {} of far clip",
                  degrees,
+                 opaquePercent,
                  K_ARCS,
                  K_SEGMENTS / K_ARCS,
                  K_ROWS,

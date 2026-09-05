@@ -26,6 +26,10 @@ private:
     constexpr static float DEFAULT_HORIZON_BLEND = 0.0F; /**< Default horizon blend angle: 0 = feature disabled */
     constexpr static float MAX_HORIZON_BLEND
         = 45.0F; /**< Upper clamp for the blend angle; beyond this the haze band dominates the view */
+    constexpr static float DEFAULT_HORIZON_OPAQUE_PERCENT
+        = 0.0F; /**< Default opaque share of the blend above the horizon line: 0 = the fade starts at the line */
+    constexpr static float MAX_HORIZON_OPAQUE_PERCENT
+        = 100.0F; /**< Upper clamp for the opaque share: the whole upper half opaque, no fade at all */
 
     /**
      * @brief ConfigMap structure which holds the configuration values for the plugin
@@ -35,6 +39,8 @@ private:
         int rimQuality {}; /**< How many times rim tiles may be quad-split to approximate the circular edge */
         float horizonBlendDegrees {}; /**< Angular height of the water-to-sky horizon blend, in degrees above and
                                          below the waterline (fHorizonBlendDegrees); 0 disables the blend */
+        float horizonBlendOpaquePercent {}; /**< Share of the blend's height above the horizon line that stays fully
+                                               opaque before the fade into the sky (fHorizonBlendOpaquePercent) */
         std::vector<std::string>
             worldSpaceBlocklist; /**< Worldspace editor IDs where the skirt is disabled (sWorldSpaceBlocklist) */
         std::vector<std::string> smallWorldAllowlist; /**< Small World-flagged worldspace editor IDs where the skirt is
@@ -79,6 +85,18 @@ public:
      * @return float The blend angle in degrees, clamped to [0, 45]
      */
     static auto getHorizonBlendDegrees() -> float;
+
+    /**
+     * @brief Get the opaque share of the horizon blend above the horizon line (fHorizonBlendOpaquePercent)
+     *
+     * The band stays fully opaque in the water color for this percentage of its height
+     * above the horizon line before it starts fading into the sky. It exists to blot out a
+     * thin bright sky strip that sits right on the line (a weather's horizon color under a
+     * darker lower sky). 0 (the default) starts the fade at the line; 100 removes the fade.
+     *
+     * @return float The percentage, clamped to [0, 100]
+     */
+    static auto getHorizonBlendOpaquePercent() -> float;
 
     /**
      * @brief Whether a worldspace is on the user's blocklist (sWorldSpaceBlocklist)

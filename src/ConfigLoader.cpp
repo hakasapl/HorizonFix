@@ -23,6 +23,10 @@ void ConfigLoader::loadConfig()
         static_cast<int>(readIniFloat(iniPath, L"iWaterSkirtRimQuality", DEFAULT_RIM_QUALITY)), 0, MAX_RIM_QUALITY);
     s_config.horizonBlendDegrees
         = std::clamp(readIniFloat(iniPath, L"fHorizonBlendDegrees", DEFAULT_HORIZON_BLEND), 0.0F, MAX_HORIZON_BLEND);
+    s_config.horizonBlendOpaquePercent
+        = std::clamp(readIniFloat(iniPath, L"fHorizonBlendOpaquePercent", DEFAULT_HORIZON_OPAQUE_PERCENT),
+                     0.0F,
+                     MAX_HORIZON_OPAQUE_PERCENT);
     s_config.worldSpaceBlocklist = readIniStringList(iniPath, L"sWorldSpaceBlocklist");
     s_config.smallWorldAllowlist = readIniStringList(iniPath, L"sSmallWorldAllowlist");
 
@@ -30,6 +34,7 @@ void ConfigLoader::loadConfig()
     spdlog::info("Config Loaded: Water Skirt Radius: {}", s_config.skirtRadius);
     spdlog::info("Config Loaded: Water Skirt Rim Quality: {}", s_config.rimQuality);
     spdlog::info("Config Loaded: Horizon Blend Degrees: {}", s_config.horizonBlendDegrees);
+    spdlog::info("Config Loaded: Horizon Blend Opaque Percent: {}", s_config.horizonBlendOpaquePercent);
     const auto joinList = [](const std::vector<std::string>& list) -> std::string {
         std::string joined;
         for (const auto& entry : list) {
@@ -49,6 +54,8 @@ auto ConfigLoader::getSkirtRadius() -> float { return s_config.skirtRadius; }
 auto ConfigLoader::getRimQuality() -> int { return s_config.rimQuality; }
 
 auto ConfigLoader::getHorizonBlendDegrees() -> float { return s_config.horizonBlendDegrees; }
+
+auto ConfigLoader::getHorizonBlendOpaquePercent() -> float { return s_config.horizonBlendOpaquePercent; }
 
 auto ConfigLoader::isWorldSpaceBlocked(const char* editorID) -> bool
 {

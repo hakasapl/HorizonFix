@@ -19,7 +19,9 @@ namespace HorizonFix {
  * split into arcs so the translucent pass sorts it as the far backdrop it is (see K_ARCS),
  * vertically centered each frame on the seam line as seen from the camera (the skirt's
  * outer rim), with a vertical alpha gradient (transparent at the top and bottom, opaque on
- * the seam line) and tinted every frame in the color the distant water renders in (see
+ * the seam line, and optionally held opaque for a configurable share of the height above
+ * it - fHorizonBlendOpaquePercent - to blot out a thin bright sky strip that sits right on
+ * the horizon line) and tinted every frame in the color the distant water renders in (see
  * s_bandColor). The band carries ONLY the water color: the opaque seam row covers the
  * hard line, and above it the fade lets the real sky show through, so the water dissolves
  * into whatever sky is actually behind it - right at every azimuth by construction, even
@@ -51,7 +53,8 @@ private:
     static constexpr int K_SEGMENTS = 96; /**< Ring segments; radius error of the polygon is ~0.05% */
     static constexpr int K_ROWS
         = 15; /**< Vertex rows for the vertical gradient. MUST BE ODD so one row lands exactly on the seam
-                 (t = 0) at full alpha. The profile between rows is linear, and the eye amplifies the slope
+                 (t = 0) at full alpha; the rows above the seam are re-spaced when an opaque plateau is
+                 configured (see buildArcGeometry). The profile between rows is linear, and the eye amplifies the slope
                  breaks at row joints into visible bands (Mach banding) - more rows push the joints below
                  visibility at typical blend angles. The remaining banding in very shallow ramps is 8-bit
                  render-target quantization (the same effect as the vanilla sky's banded gradients), which
@@ -241,17 +244,20 @@ private:
      * world scale derived from the far clip sizes both together and the blend angle seen
      * from the camera stays exactly the configured value. Vertex layout is full-precision
      * position + UV + color (the same descriptor the donor NIF declares); the alpha gradient
-     * lives in the vertex colors, smoothstep-shaped from 0 at both rims to 255 at the
-     * center row. The arc's tight model bound is returned for the sort/cull behavior
+     * lives in the vertex colors: smoothstep from 0 at the bottom rim to 255 on the seam
+     * row, held at 255 for opaqueFraction of the height above the seam, then smoothstep to
+     * 0 at the top rim. The arc's tight model bound is returned for the sort/cull behavior
      * described at K_ARCS.
      *
      * @param arcIndex Which of the K_ARCS arcs to build (0-based)
      * @param blendDegrees Blend angle in degrees (already validated > 0)
+     * @param opaqueFraction Share (0-1) of the height above the seam kept fully opaque before the fade
      * @param boundOut Receives the arc's model-space bounding sphere
      * @return RE::BSGraphics::TriShape* Geometry carrying one reference (the caller's), or nullptr on failure
      */
     static auto buildArcGeometry(int arcIndex,
                                  float blendDegrees,
+                                 float opaqueFraction,
                                  RE::NiBound& boundOut) -> RE::BSGraphics::TriShape*;
 
     /**
