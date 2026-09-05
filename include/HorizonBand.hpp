@@ -19,8 +19,13 @@ namespace HorizonFix {
  * split into arcs so the translucent pass sorts it as the far backdrop it is (see K_ARCS),
  * vertically centered each frame on the seam line as seen from the camera (the skirt's
  * outer rim), with a vertical alpha gradient (transparent at the top and bottom, opaque on
- * the seam line) and its color re-tinted every frame from the sky's live horizon color -
- * so it matches any weather mod, time of day, or transition automatically.
+ * the seam line) and tinted every frame in the color the distant water renders in (see
+ * s_bandColor). The band carries ONLY the water color: the opaque seam row covers the
+ * hard line, and above it the fade lets the real sky show through, so the water dissolves
+ * into whatever sky is actually behind it - right at every azimuth by construction, even
+ * when a renderer paints the sky warm toward the sun and cool away from it. No sky color
+ * is read or matched: a band that painted a sky color could only ever be one color around
+ * the whole ring, while the sky it has to meet is not.
  *
  * The object graph (BSTriShape + BSEffectShaderProperty + NiAlphaProperty) comes from a
  * shipped donor NIF so the engine's own model loader constructs it correctly on every
@@ -78,51 +83,42 @@ private:
     static inline bool s_loadFailed = false; /**< Donor NIF failed to load; stop retrying for this session */
     static inline bool s_loggedFirstFrame = false; /**< One-shot diagnostic log on the first frame update */
 
-    // Per-row tint gradient, refreshed each frame from the live sky. The rows below the
-    // waterline take the FOG FAR color - what distant water converges to as its fog
-    // saturates, in vanilla and under CS Unified Water alike - and the rows above take
-    // the HORIZON color the sky shows at the seam, crossfading through the middle rows.
-    // A single horizon tint left the band's water side mismatched against water whose
-    // convergence color differs from the sky (glaring under Unified Water; the direction
-    // chosen is to match the band to the water, never to re-tint the water). The colors
-    // ride the vertex colors of a DYNAMIC vertex buffer: updateFrame (game side) computes
-    // s_rowColors and bumps s_tintStamp; the SetupGeometry hook (context-owning thread,
+    // Band tint, refreshed each frame: the color the distant water renders in. Its prior
+    // is the sky's FOG FAR color - what distant water converges to as its fog saturates,
+    // in vanilla and under CS Unified Water alike - trimmed by the closed-loop correction
+    // below until the band matches the water it stands on. Every row carries this one
+    // color; the vertical shape of the blend is the alpha gradient alone. Below the seam
+    // the band paints matched water over water (invisible once converged, and what the
+    // loop measures); above the seam it fades out over the real sky. The color rides the
+    // vertex colors of a DYNAMIC vertex buffer: updateFrame (game side) computes
+    // s_bandColor and bumps s_tintStamp; the SetupGeometry hook (context-owning thread,
     // the only place mapping the buffer is safe) rewrites each arc's buffer when its
     // stamp is stale. A torn read of a color float costs at most one frame of an
     // imperceptibly wrong hue, so only the stamp itself is atomic.
-    static inline std::array<RE::NiColor, K_ROWS> s_rowColors {}; /**< Row tints, bottom row first */
-    static inline std::atomic<std::uint32_t> s_tintStamp {0}; /**< Bumped when s_rowColors changes */
+    static inline RE::NiColor s_bandColor {}; /**< Tint of every band vertex this frame */
+    static inline std::atomic<std::uint32_t> s_tintStamp {0}; /**< Bumped when s_bandColor changes */
     static inline std::array<std::uint32_t, K_ARCS>
         s_arcTintStamps {}; /**< s_tintStamp value each arc's buffer was last written with */
     static inline RE::BSFixedString s_bandName; /**< Interned K_SHAPE_NAME for cheap per-pass comparison */
 
-    // Automatic color matching of BOTH gradient endpoints. The fog-far and horizon tints
-    // are only priors: what the water and sky ACTUALLY render depends on the whole
-    // pipeline - fog clamp residuals, CS Unified Water, ENB, and per-surface transforms
-    // like CS Linear Lighting's gammas/multipliers, which shade effect geometry through
-    // different curves than sky and fog (field-observed as a stripe at the seam with LL
-    // enabled while the water-only loop matched). The render hooks measure reality
-    // instead: right before the band draws, the framebuffer under it still shows pure
-    // water below the seam and pure sky above - those are the colors to match; right
-    // after, it shows the band's blend. Small regions at sample rays on both rows are
-    // copied around the band's draws into a staging ring, read back a few frames later
-    // (no GPU stall), and the per-channel differences feed integral corrections on the
-    // water-side and sky-side tints until the on-screen difference is zero. Rays occluded
-    // by closer geometry self-cancel: the depth test already kept the band from drawing
-    // there, so pre and post are identical.
-    static constexpr int K_MATCH_SAMPLES = 5; /**< Sample rays per row, spread across the view's horizon */
-    static constexpr int K_MATCH_TOTAL = K_MATCH_SAMPLES * 2; /**< Water-row samples, then sky-row samples */
+    // Automatic color matching of the band tint. The fog-far color is only a prior: what
+    // the water ACTUALLY renders depends on the whole pipeline - fog clamp residuals, CS
+    // Unified Water, ENB, per-surface transforms like CS Linear Lighting's gammas, and the
+    // effect shader's own fog on the band itself. The render hooks measure reality
+    // instead: right before the band draws, the framebuffer under its water row still
+    // shows pure water - that is the color to match; right after, it shows the band's
+    // blend. Small regions at sample rays on that row are copied around the band's draws
+    // into a staging ring, read back a few frames later (no GPU stall), and the
+    // per-channel differences feed an integral correction on the tint until the on-screen
+    // difference is zero. Rays occluded by closer geometry self-cancel: the depth test
+    // already kept the band from drawing there, so pre and post are identical.
+    static constexpr int K_MATCH_SAMPLES = 5; /**< Sample rays, spread across the view's horizon */
     static constexpr float K_MATCH_AZIMUTH_STEP = 20.0F; /**< Degrees between adjacent sample rays */
-    static constexpr float K_MATCH_ROW_T_WATER = -0.35F; /**< Water-row band parameter: below the seam, alpha ~0.7 */
-    static constexpr float K_MATCH_ROW_T_SKY = 0.35F; /**< Sky-row band parameter: above the seam, alpha ~0.7 */
+    static constexpr float K_MATCH_ROW_T = -0.35F; /**< Sample row's band parameter: below the seam, alpha ~0.7 */
     static constexpr int K_MATCH_RING = 4; /**< Staging slots in flight; reads lag captures by 3 frames */
-    static constexpr float K_MATCH_GAIN_WATER = 0.08F; /**< Per-frame integral gain, water endpoint */
-    static constexpr float K_MATCH_GAIN_SKY
-        = 0.04F; /**< Per-frame integral gain, sky endpoint (slower: its reference is noisier - clouds, sun glow) */
-    static constexpr float K_MATCH_WATER_MIN = 0.1F; /**< Water correction clamps (gamma-scale headroom for LL) */
-    static constexpr float K_MATCH_WATER_MAX = 3.0F;
-    static constexpr float K_MATCH_SKY_MIN = 0.5F; /**< Sky correction clamps (tighter: feeds the seam row's mix) */
-    static constexpr float K_MATCH_SKY_MAX = 2.0F;
+    static constexpr float K_MATCH_GAIN = 0.08F; /**< Per-frame integral gain */
+    static constexpr float K_MATCH_MIN = 0.1F; /**< Correction clamps (gamma-scale headroom for LL) */
+    static constexpr float K_MATCH_MAX = 3.0F;
 
     /**
      * @brief One in-flight capture: a K_MATCH_SAMPLES x 2 staging texture (row 0 = before
@@ -131,7 +127,7 @@ private:
     struct MatchSlot {
         REX::W32::ID3D11Texture2D* staging = nullptr; /**< Ref held by the slot */
         std::uint32_t frame = 0; /**< s_tintStamp value of the captures */
-        std::array<std::array<float, 2>, K_MATCH_TOTAL>
+        std::array<std::array<float, 2>, K_MATCH_SAMPLES>
             uv {}; /**< Snapshot of s_sampleUV at pre-capture, so pre, post, and readback
                       all use the same pixels even while the game thread moves the points */
         bool hasPre = false; /**< Row 0 holds this frame's pre-band copy */
@@ -141,22 +137,18 @@ private:
     static inline std::uint32_t s_matchFormat = 0; /**< DXGI format the staging textures match */
     static inline std::uint32_t s_matchCaptureFrame = 0; /**< Frame of the last pre-capture (render side only) */
     static inline bool s_matchDisabled = false; /**< Loop off for this session (VR, MSAA, exotic format) */
-    static inline std::array<std::array<float, 2>, K_MATCH_TOTAL>
+    static inline std::array<std::array<float, 2>, K_MATCH_SAMPLES>
         s_sampleUV {}; /**< Sample points in 0-1 viewport coordinates; x < 0 = invalid. Game side writes */
     static inline std::atomic<bool> s_samplesValid {false}; /**< Any sample point usable this frame */
     static inline std::array<std::atomic<float>, 3> s_waterCorrection {
         1.0F,
         1.0F,
-        1.0F}; /**< Per-channel multiplier the loop applies to the fog-far tint */
-    static inline std::array<std::atomic<float>, 3> s_skyCorrection {
-        1.0F,
-        1.0F,
-        1.0F}; /**< Per-channel multiplier the loop applies to the horizon tint */
+        1.0F}; /**< Per-channel multiplier the loop applies to the fog-far prior */
 
     /**
-     * @brief Hook for BSEffectShader::SetupGeometry: refreshes a band arc's vertex-color
-     * gradient and captures the pre-band framebuffer samples before it draws (see
-     * s_rowColors and MatchSlot); every other effect pass is untouched
+     * @brief Hook for BSEffectShader::SetupGeometry: refreshes a band arc's vertex colors
+     * and captures the pre-band framebuffer samples before it draws (see s_bandColor and
+     * MatchSlot); every other effect pass is untouched
      */
     struct SetupGeometryHook {
         static void thunk(RE::BSShader* shaderPtr,
@@ -213,8 +205,8 @@ public:
      *
      * Moves the band to the camera's XY, scales it from the live far clip distance, centers
      * it vertically on the water-sky seam's depression angle (see the implementation for
-     * the tangent-ratio math), and writes the sky's current horizon color into every arc's
-     * effect material.
+     * the tangent-ratio math), and publishes this frame's band color (the corrected
+     * fog-far prior, see s_bandColor) for the render hook to upload.
      *
      * @param camera The world root camera for this frame
      */
@@ -300,7 +292,7 @@ private:
     static auto isBandPass(RE::BSRenderPass* passPtr) -> bool;
 
     /**
-     * @brief Rewrites one arc's vertex colors from s_rowColors (see the gradient comment)
+     * @brief Rewrites one arc's vertex colors from s_bandColor (see its comment)
      *
      * Runs from the SetupGeometry hook on the thread that owns the D3D context: rewrites
      * the RGB bytes of the CPU vertex copy (alpha profile untouched) and uploads the whole
@@ -323,9 +315,10 @@ private:
      * @brief Projects the color-match sample points onto the screen (see MatchSlot)
      *
      * Runs game-side from updateFrame with the same camera the frame renders with. Sample
-     * rays fan out across the camera's horizontal forward at the band's radius, on two
-     * band rows: one below the seam (water reference) and one above it (sky reference).
-     * Points behind the camera or outside the safe viewport region are marked invalid;
+     * rays fan out across the camera's horizontal forward at the band's radius, on the
+     * band row just below the seam (K_MATCH_ROW_T), where the framebuffer under the band
+     * shows pure water. Points behind the camera or outside the safe viewport region are
+     * marked invalid;
      * VR disables the loop entirely (two eyes, one projection).
      *
      * @param camera The world root camera
@@ -355,7 +348,7 @@ private:
      *
      * Render side, once per frame. Maps with DO_NOT_WAIT (a still-busy copy is simply
      * skipped), averages the per-channel pre/post difference over the valid samples, and
-     * integrates it into the per-row corrections with their gains.
+     * integrates it into the correction with K_MATCH_GAIN.
      *
      * @param frame The current frame stamp; the slot from frame - (K_MATCH_RING - 1) is read
      */
@@ -384,8 +377,8 @@ private:
     /**
      * @brief Permanently disables the color-match loop for this session (logged once)
      *
-     * The correction freezes at its current value; the gradient keeps working on the
-     * fog-far prior alone.
+     * The correction freezes at its current value; the band keeps rendering the fog-far
+     * prior with that frozen trim.
      *
      * @param reason Short reason for the log
      */
