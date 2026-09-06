@@ -75,6 +75,12 @@ private:
                   "arcs must tile the ring exactly");
     static constexpr float K_FARCLIP_FRACTION
         = 0.9F; /**< The band's farthest point (its top/bottom rim) sits at this fraction of the far clip */
+    static constexpr float K_DEBUG_COLOR_SCALE
+        = 8.0F; /**< Material color scale under bHorizonBlendDebug. At the band's range the effect shader's
+                   distance fog keeps only (1 - fog clamp) of the vertex color, often a tenth or less, so a
+                   plain red would render as a faint cast; pushing the red channel far past 1 in the HDR
+                   target makes the band unmistakable while the alpha profile still shapes it. A weather
+                   whose fog clamp is exactly 1 leaves the band no color authority at all - no red shows. */
 
     static inline RE::NiPointer<RE::NiNode> s_model; /**< Demanded donor model root; loaded once per session */
     static inline std::vector<RE::NiPointer<RE::BSTriShape>>
@@ -98,7 +104,7 @@ private:
     // the only place mapping the buffer is safe) rewrites each arc's buffer when its
     // stamp is stale. A torn read of a color float costs at most one frame of an
     // imperceptibly wrong hue, so only the stamp itself is atomic.
-    static inline RE::NiColor s_bandColor {}; /**< Tint of every band vertex this frame */
+    static inline RE::NiColor s_bandColor {}; /**< Tint of every band vertex this frame (pure red under bHorizonBlendDebug) */
     static inline std::atomic<std::uint32_t> s_tintStamp {0}; /**< Bumped when s_bandColor changes */
     static inline std::array<std::uint32_t, K_ARCS>
         s_arcTintStamps {}; /**< s_tintStamp value each arc's buffer was last written with */
@@ -209,7 +215,8 @@ public:
      * Moves the band to the camera's XY, scales it from the live far clip distance, centers
      * it vertically on the water-sky seam's depression angle (see the implementation for
      * the tangent-ratio math), and publishes this frame's band color (the corrected
-     * fog-far prior, see s_bandColor) for the render hook to upload.
+     * fog-far prior, see s_bandColor - or pure red under bHorizonBlendDebug, with the
+     * color matching parked) for the render hook to upload.
      *
      * @param camera The world root camera for this frame
      */

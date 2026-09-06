@@ -780,7 +780,9 @@ void HorizonBand::configureArc(RE::BSTriShape* arcShape)
     }
     if (auto* const material = property->GetMaterial(); material != nullptr) {
         material->baseColor = RE::NiColorA {1.0F, 1.0F, 1.0F, 1.0F};
-        material->baseColorScale = 1.0F;
+        // The debug tint is boosted so it survives the effect shader's distance fog at the
+        // band's range (see K_DEBUG_COLOR_SCALE); the normal tint needs no headroom
+        material->baseColorScale = ConfigLoader::isHorizonBlendDebug() ? K_DEBUG_COLOR_SCALE : 1.0F;
         material->falloffStartAngle = 1.0F;
         material->falloffStopAngle = 1.0F;
         material->falloffStartOpacity = 1.0F;
@@ -879,13 +881,14 @@ auto HorizonBand::loadModel() -> bool
     }
 
     spdlog::info("Horizon blend band built: {} degrees, {}% opaque above the seam, {} arcs x {} segments x {} rows, "
-                 "rim at {} of far clip",
+                 "rim at {} of far clip{}",
                  degrees,
                  opaquePercent,
                  K_ARCS,
                  K_SEGMENTS / K_ARCS,
                  K_ROWS,
-                 K_FARCLIP_FRACTION);
+                 K_FARCLIP_FRACTION,
+                 ConfigLoader::isHorizonBlendDebug() ? " - DEBUG TINT ON (red band, color matching parked)" : "");
     return true;
 }
 
@@ -958,8 +961,18 @@ void HorizonBand::updateFrame(const RE::NiCamera* camera)
     RE::NiUpdateData updateData {};
     s_model->Update(updateData);
 
-    // Keep the color-match sample points tracking this frame's camera and band placement
-    computeSampleUVs(camera, scale, cameraPos.z - seamDrop, scale * std::tan(radians));
+    // Debug tint (bHorizonBlendDebug): pure red with the alpha profile intact, so the
+    // band's placement, height, plateau, and fade can be seen against the real horizon.
+    // The matching loop is not fed - there is nothing to match a red band against - so
+    // the correction simply holds. The red is boosted by K_DEBUG_COLOR_SCALE (see
+    // configureArc) to punch through the effect shader's distance fog at the band's range.
+    const bool debugTint = ConfigLoader::isHorizonBlendDebug();
+    if (debugTint) {
+        s_samplesValid.store(false, std::memory_order_release);
+    } else {
+        // Keep the color-match sample points tracking this frame's camera and band placement
+        computeSampleUVs(camera, scale, cameraPos.z - seamDrop, scale * std::tan(radians));
+    }
 
     // Re-tint in the far water's color: distant water converges to the sky's FOG FAR
     // color as its fog saturates (vanilla and CS Unified Water alike), and the closed-loop
@@ -970,7 +983,10 @@ void HorizonBand::updateFrame(const RE::NiCamera* camera)
     // ever being known (see s_bandColor). The actual vertex rewrite happens in the render
     // hook; here only the target is computed.
     auto* const sky = RE::Sky::GetSingleton();
-    if (sky != nullptr) {
+    if (debugTint) {
+        s_bandColor = RE::NiColor {1.0F, 0.0F, 0.0F};
+        s_tintStamp.fetch_add(1, std::memory_order_release);
+    } else if (sky != nullptr) {
         const auto& rawFogFar = sky->skyColor[RE::TESWeather::ColorTypes::kFogFar];
         s_bandColor = RE::NiColor {
             std::clamp(rawFogFar.red * s_waterCorrection.at(0).load(std::memory_order_relaxed), 0.0F, 1.0F),

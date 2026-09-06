@@ -41,6 +41,7 @@ private:
                                          below the waterline (fHorizonBlendDegrees); 0 disables the blend */
         float horizonBlendOpaquePercent {}; /**< Share of the blend's height above the horizon line that stays fully
                                                opaque before the fade into the sky (fHorizonBlendOpaquePercent) */
+        bool horizonBlendDebug {}; /**< Paint the horizon blend band red for placement debugging (bHorizonBlendDebug) */
         std::vector<std::string>
             worldSpaceBlocklist; /**< Worldspace editor IDs where the skirt is disabled (sWorldSpaceBlocklist) */
         std::vector<std::string> smallWorldAllowlist; /**< Small World-flagged worldspace editor IDs where the skirt is
@@ -97,6 +98,18 @@ public:
      * @return float The percentage, clamped to [0, 100]
      */
     static auto getHorizonBlendOpaquePercent() -> float;
+
+    /**
+     * @brief Whether the horizon blend band is painted red for debugging (bHorizonBlendDebug)
+     *
+     * With the tint on, the band keeps its geometry and alpha profile but renders pure red
+     * (boosted to survive distance fog) instead of the matched water color, and the color
+     * matching loop is parked. Off by default, and deliberately absent from the shipped INI:
+     * add bHorizonBlendDebug=1 under [General] by hand to enable it.
+     *
+     * @return bool True when the debug tint is enabled
+     */
+    static auto isHorizonBlendDebug() -> bool;
 
     /**
      * @brief Whether a worldspace is on the user's blocklist (sWorldSpaceBlocklist)
