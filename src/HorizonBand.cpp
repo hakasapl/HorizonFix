@@ -78,20 +78,23 @@ void HorizonBand::refreshArcColors(RE::BSTriShape* arcShape,
         return;
     }
 
-    // Rewrite the RGB bytes in the CPU copy from the per-row gradient; the alpha byte
-    // keeps carrying the opacity profile untouched
+    // Rewrite the RGB bytes of every vertex in the CPU copy from the band color; the
+    // alpha byte keeps carrying the opacity profile untouched
     constexpr std::uint32_t COLUMNS = (K_SEGMENTS / K_ARCS) + 1;
     constexpr std::uint32_t VERTEX_COUNT = COLUMNS * K_ROWS;
     const auto toByte = [](float channel) -> std::uint8_t {
         return static_cast<std::uint8_t>(std::lround(std::clamp(channel, 0.0F, 1.0F) * 255.0F));
     };
+    const RE::NiColor color = s_bandColor;
+    const std::uint8_t red = toByte(color.red);
+    const std::uint8_t green = toByte(color.green);
+    const std::uint8_t blue = toByte(color.blue);
     for (std::uint32_t vertex = 0; vertex < VERTEX_COUNT; ++vertex) {
-        const auto& rowColor = s_rowColors.at(vertex / COLUMNS);
         std::uint8_t* const colorBytes = data->rawVertexData + (static_cast<std::size_t>(vertex) * sizeof(RingVertex))
             + offsetof(RingVertex, rgba);
-        colorBytes[0] = toByte(rowColor.red);
-        colorBytes[1] = toByte(rowColor.green);
-        colorBytes[2] = toByte(rowColor.blue);
+        colorBytes[0] = red;
+        colorBytes[1] = green;
+        colorBytes[2] = blue;
     }
 
     // Full-buffer discard upload; the buffer object identity is unchanged, so nothing
@@ -112,7 +115,7 @@ void HorizonBand::computeSampleUVs(const RE::NiCamera* camera,
                                    float halfHeightWorld)
 {
     // One projection cannot serve two VR eyes; the loop stands down there and the
-    // fog-far prior alone drives the water side
+    // fog-far prior alone drives the band
     if (REL::Module::IsVR()) {
         s_samplesValid.store(false, std::memory_order_release);
         return;
@@ -139,37 +142,34 @@ void HorizonBand::computeSampleUVs(const RE::NiCamera* camera,
     }
     forwardHorizontal /= forwardLength;
 
-    // Rays fan out around the camera's horizontal heading on two band rows: one below the
-    // seam (water reference) and one above (sky reference), both inside the band's
-    // strong-alpha zone
-    constexpr std::array<float, 2> ROW_TS {K_MATCH_ROW_T_WATER, K_MATCH_ROW_T_SKY};
-    for (int rowIndex = 0; rowIndex < 2; ++rowIndex) {
-        const float sampleZOffset = (bandZ + (ROW_TS.at(rowIndex) * halfHeightWorld)) - world.translate.z;
-        for (int i = 0; i < K_MATCH_SAMPLES; ++i) {
-            auto& sample = s_sampleUV.at((static_cast<std::size_t>(rowIndex) * K_MATCH_SAMPLES) + i);
-            sample.at(0) = -1.0F;
-            const float azimuth = static_cast<float>(i - ((K_MATCH_SAMPLES - 1) / 2)) * K_MATCH_AZIMUTH_STEP
-                * std::numbers::pi_v<float> / 180.0F;
-            const float sinAz = std::sin(azimuth);
-            const float cosAz = std::cos(azimuth);
-            const RE::NiPoint3 toSample {((cosAz * forwardHorizontal.x) - (sinAz * forwardHorizontal.y)) * scale,
-                                         ((sinAz * forwardHorizontal.x) + (cosAz * forwardHorizontal.y)) * scale,
-                                         sampleZOffset};
-            const float depth = toSample.Dot(forward);
-            if (depth < 1.0F) {
-                continue;
-            }
-            const float u = ((toSample.Dot(right) / depth) - frustum.fLeft) / horizontalWidth;
-            const float v = (frustum.fTop - (toSample.Dot(up) / depth)) / verticalHeight;
-            // Keep a safety margin from the viewport edges (dynamic resolution, TAA jitter)
-            constexpr float MARGIN = 0.03F;
-            if (u < MARGIN || u > 1.0F - MARGIN || v < MARGIN || v > 1.0F - MARGIN) {
-                continue;
-            }
-            sample.at(0) = u;
-            sample.at(1) = v;
-            anyValid = true;
+    // Rays fan out around the camera's horizontal heading on the band row just below the
+    // seam, inside the band's strong-alpha zone, where the framebuffer under the band is
+    // pure water
+    const float sampleZOffset = (bandZ + (K_MATCH_ROW_T * halfHeightWorld)) - world.translate.z;
+    for (int i = 0; i < K_MATCH_SAMPLES; ++i) {
+        auto& sample = s_sampleUV.at(static_cast<std::size_t>(i));
+        sample.at(0) = -1.0F;
+        const float azimuth = static_cast<float>(i - ((K_MATCH_SAMPLES - 1) / 2)) * K_MATCH_AZIMUTH_STEP
+            * std::numbers::pi_v<float> / 180.0F;
+        const float sinAz = std::sin(azimuth);
+        const float cosAz = std::cos(azimuth);
+        const RE::NiPoint3 toSample {((cosAz * forwardHorizontal.x) - (sinAz * forwardHorizontal.y)) * scale,
+                                     ((sinAz * forwardHorizontal.x) + (cosAz * forwardHorizontal.y)) * scale,
+                                     sampleZOffset};
+        const float depth = toSample.Dot(forward);
+        if (depth < 1.0F) {
+            continue;
         }
+        const float u = ((toSample.Dot(right) / depth) - frustum.fLeft) / horizontalWidth;
+        const float v = (frustum.fTop - (toSample.Dot(up) / depth)) / verticalHeight;
+        // Keep a safety margin from the viewport edges (dynamic resolution, TAA jitter)
+        constexpr float MARGIN = 0.03F;
+        if (u < MARGIN || u > 1.0F - MARGIN || v < MARGIN || v > 1.0F - MARGIN) {
+            continue;
+        }
+        sample.at(0) = u;
+        sample.at(1) = v;
+        anyValid = true;
     }
     s_samplesValid.store(anyValid, std::memory_order_release);
 }
@@ -331,7 +331,7 @@ void HorizonBand::captureMatchSamples(bool post)
             return;
         }
         REX::W32::D3D11_TEXTURE2D_DESC stagingDesc {};
-        stagingDesc.width = K_MATCH_TOTAL;
+        stagingDesc.width = K_MATCH_SAMPLES;
         stagingDesc.height = 2;
         stagingDesc.mipLevels = 1;
         stagingDesc.arraySize = 1;
@@ -358,7 +358,7 @@ void HorizonBand::captureMatchSamples(bool post)
     if (!post) {
         slot.uv = s_sampleUV; // freeze the points for this capture pair and its readback
     }
-    for (int i = 0; i < K_MATCH_TOTAL; ++i) {
+    for (int i = 0; i < K_MATCH_SAMPLES; ++i) {
         const float u = slot.uv.at(i).at(0);
         const float v = slot.uv.at(i).at(1);
         if (u < 0.0F) {
@@ -409,10 +409,10 @@ void HorizonBand::consumeMatchSlot(std::uint32_t frame)
     const std::uint32_t stride = texelSize(s_matchFormat);
     const auto* const preRow = static_cast<const std::uint8_t*>(mapped.data);
     const auto* const postRow = preRow + mapped.rowPitch;
-    std::array<std::array<float, 3>, 2> errorSum {};
-    std::array<std::array<float, 3>, 2> preSum {};
-    std::array<int, 2> used {};
-    for (int i = 0; i < K_MATCH_TOTAL; ++i) {
+    std::array<float, 3> errorSum {};
+    std::array<float, 3> preSum {};
+    int used = 0;
+    for (int i = 0; i < K_MATCH_SAMPLES; ++i) {
         if (slot.uv.at(i).at(0) < 0.0F) {
             continue;
         }
@@ -422,39 +422,30 @@ void HorizonBand::consumeMatchSlot(std::uint32_t frame)
             || !decodeTexel(postRow + (static_cast<std::size_t>(i) * stride), s_matchFormat, postColor)) {
             continue;
         }
-        const int rowIndex = i / K_MATCH_SAMPLES; // 0 = water row, 1 = sky row
-        errorSum.at(rowIndex).at(0) += pre.red - postColor.red;
-        errorSum.at(rowIndex).at(1) += pre.green - postColor.green;
-        errorSum.at(rowIndex).at(2) += pre.blue - postColor.blue;
-        preSum.at(rowIndex).at(0) += pre.red;
-        preSum.at(rowIndex).at(1) += pre.green;
-        preSum.at(rowIndex).at(2) += pre.blue;
-        ++used.at(rowIndex);
+        errorSum.at(0) += pre.red - postColor.red;
+        errorSum.at(1) += pre.green - postColor.green;
+        errorSum.at(2) += pre.blue - postColor.blue;
+        preSum.at(0) += pre.red;
+        preSum.at(1) += pre.green;
+        preSum.at(2) += pre.blue;
+        ++used;
     }
     context->Unmap(slot.staging, 0);
     slot.hasPre = false;
     slot.hasPost = false;
 
-    // Integrate the observed on-screen differences into the endpoint tints. Occluded
-    // samples contribute zero (the band never drew there), so they only dilute the
-    // gain, never bias the color.
-    for (int rowIndex = 0; rowIndex < 2; ++rowIndex) {
-        if (used.at(rowIndex) == 0) {
-            continue;
-        }
-        const bool waterRow = rowIndex == 0;
-        auto& corrections = waterRow ? s_waterCorrection : s_skyCorrection;
-        const float gain = waterRow ? K_MATCH_GAIN_WATER : K_MATCH_GAIN_SKY;
-        const float clampMin = waterRow ? K_MATCH_WATER_MIN : K_MATCH_SKY_MIN;
-        const float clampMax = waterRow ? K_MATCH_WATER_MAX : K_MATCH_SKY_MAX;
+    // Integrate the observed on-screen difference into the tint. Occluded samples
+    // contribute zero (the band never drew there), so they only dilute the gain, never
+    // bias the color.
+    if (used > 0) {
         for (int channel = 0; channel < 3; ++channel) {
-            const float error = errorSum.at(rowIndex).at(channel) / static_cast<float>(used.at(rowIndex));
-            const float reference
-                = std::max(preSum.at(rowIndex).at(channel) / static_cast<float>(used.at(rowIndex)), 0.05F);
-            auto& correction = corrections.at(channel);
-            const float updated = std::clamp(correction.load(std::memory_order_relaxed) + (gain * error / reference),
-                                             clampMin,
-                                             clampMax);
+            const float error = errorSum.at(channel) / static_cast<float>(used);
+            const float reference = std::max(preSum.at(channel) / static_cast<float>(used), 0.05F);
+            auto& correction = s_waterCorrection.at(channel);
+            const float updated
+                = std::clamp(correction.load(std::memory_order_relaxed) + (K_MATCH_GAIN * error / reference),
+                             K_MATCH_MIN,
+                             K_MATCH_MAX);
             correction.store(updated, std::memory_order_relaxed);
         }
     }
@@ -462,16 +453,11 @@ void HorizonBand::consumeMatchSlot(std::uint32_t frame)
     // Periodic diagnostic so field reports carry the loop's state (roughly every 10s)
     static std::uint32_t consumedCount = 0;
     if (++consumedCount % 600 == 0) {
-        spdlog::info("Horizon blend match: water corr ({:.3f}, {:.3f}, {:.3f}) x{}, sky corr ({:.3f}, {:.3f}, "
-                     "{:.3f}) x{}",
+        spdlog::info("Horizon blend match: water corr ({:.3f}, {:.3f}, {:.3f}) x{}",
                      s_waterCorrection.at(0).load(std::memory_order_relaxed),
                      s_waterCorrection.at(1).load(std::memory_order_relaxed),
                      s_waterCorrection.at(2).load(std::memory_order_relaxed),
-                     used.at(0),
-                     s_skyCorrection.at(0).load(std::memory_order_relaxed),
-                     s_skyCorrection.at(1).load(std::memory_order_relaxed),
-                     s_skyCorrection.at(2).load(std::memory_order_relaxed),
-                     used.at(1));
+                     used);
     }
 }
 
@@ -573,6 +559,7 @@ void HorizonBand::releaseGeometryData(RE::BSGraphics::TriShape* dataPtr)
 
 auto HorizonBand::buildArcGeometry(int arcIndex,
                                    float blendDegrees,
+                                   float opaqueFraction,
                                    RE::NiBound& boundOut) -> RE::BSGraphics::TriShape*
 {
     auto* const device = RE::BSGraphics::Renderer::GetDevice();
@@ -599,13 +586,38 @@ auto HorizonBand::buildArcGeometry(int arcIndex,
                          std::numeric_limits<float>::lowest()};
     std::vector<RingVertex> vertices;
     vertices.reserve(VERTEX_COUNT);
+    // Row placement and alpha profile. The row parameter t runs from -1 (bottom rim) to +1
+    // (top rim) with the center row exactly on the seam (t = 0). Below the seam the rows
+    // are uniform and the alpha smoothsteps from 0 at the rim to 1 at the seam: the band
+    // there paints the far water's color over nearer, less fogged water, and that soft
+    // fade-in is what keeps its lower edge from drawing a line of its own. Above the seam
+    // the alpha stays at 1 up to the configured share of the upper half (so a thin bright
+    // sky strip sitting right on the horizon line is covered outright), then smoothsteps
+    // to 0 at the top rim over the remaining height. With a plateau the upper rows are
+    // re-spaced so one row lands exactly on the plateau's end and the rest resolve the
+    // fade; without one they stay uniform like the lower half.
+    constexpr std::uint32_t SEAM_ROW = (K_ROWS - 1) / 2;
+    constexpr std::uint32_t UPPER_ROWS = K_ROWS - 1 - SEAM_ROW; // rows strictly above the seam
+    const float plateau = std::clamp(opaqueFraction, 0.0F, 1.0F);
+    const auto smoothstep = [](float x) -> float { return x * x * (3.0F - (2.0F * x)); };
     for (std::uint32_t row = 0; row < K_ROWS; ++row) {
-        // Row parameter from -1 (bottom rim) to +1 (top rim); the alpha gradient is a
-        // smoothstep of the distance from the rims, peaking fully opaque at the center
-        // row so the seam is completely covered
-        const float t = (2.0F * static_cast<float>(row) / (K_ROWS - 1)) - 1.0F;
-        const float rimDistance = 1.0F - std::fabs(t);
-        const float alpha = rimDistance * rimDistance * (3.0F - (2.0F * rimDistance));
+        float t = 0.0F;
+        float alpha = 1.0F;
+        if (row <= SEAM_ROW) {
+            t = (static_cast<float>(row) / static_cast<float>(SEAM_ROW)) - 1.0F;
+            alpha = smoothstep(1.0F + t);
+        } else {
+            const std::uint32_t k = row - SEAM_ROW; // 1 .. UPPER_ROWS
+            if (plateau <= 0.0F) {
+                t = static_cast<float>(k) / static_cast<float>(UPPER_ROWS);
+            } else if (k == 1) {
+                t = plateau; // the plateau's end, still fully opaque
+            } else {
+                t = plateau + ((1.0F - plateau) * static_cast<float>(k - 1) / static_cast<float>(UPPER_ROWS - 1));
+            }
+            const float fadeHeight = 1.0F - plateau;
+            alpha = (t <= plateau || fadeHeight <= 0.0F) ? 1.0F : smoothstep((1.0F - t) / fadeHeight);
+        }
         const auto alphaByte = static_cast<std::uint8_t>(std::lround(alpha * 255.0F));
         for (std::uint32_t column = 0; column < COLUMNS; ++column) {
             const auto ringColumn = (static_cast<std::uint32_t>(arcIndex) * ARC_SEGMENTS) + column;
@@ -668,7 +680,7 @@ auto HorizonBand::buildArcGeometry(int arcIndex,
     std::memcpy(rawIndices, indices.data(), indexBytes);
 
     // GPU side, seeded from the CPU copies. The vertex buffer is DYNAMIC because the
-    // per-row tint gradient rewrites the vertex colors as the sky changes
+    // per-frame tint rewrites the vertex colors as the water color changes
     // (refreshArcColors); the index buffer never changes.
     REX::W32::D3D11_BUFFER_DESC vertexBufferDesc {};
     vertexBufferDesc.byteWidth = static_cast<std::uint32_t>(vertexBytes);
@@ -762,13 +774,15 @@ void HorizonBand::configureArc(RE::BSTriShape* arcShape)
     property->alpha = 1.0F;
 
     // The loader may hand shared/pooled materials to identical properties; force a unique
-    // copy so the per-frame horizon tint can never leak into someone else's effect
+    // copy so the band's material settings can never leak into someone else's effect
     if (auto* const material = property->GetMaterial(); material != nullptr) {
         property->SetMaterial(material, true);
     }
     if (auto* const material = property->GetMaterial(); material != nullptr) {
         material->baseColor = RE::NiColorA {1.0F, 1.0F, 1.0F, 1.0F};
-        material->baseColorScale = 1.0F;
+        // The debug tint is boosted so it survives the effect shader's distance fog at the
+        // band's range (see K_DEBUG_COLOR_SCALE); the normal tint needs no headroom
+        material->baseColorScale = ConfigLoader::isHorizonBlendDebug() ? K_DEBUG_COLOR_SCALE : 1.0F;
         material->falloffStartAngle = 1.0F;
         material->falloffStopAngle = 1.0F;
         material->falloffStartOpacity = 1.0F;
@@ -823,10 +837,11 @@ auto HorizonBand::loadModel() -> bool
     // individually - configuring only the donor left the clones on the raw NIF material,
     // which showed as per-segment color seams.
     const float degrees = ConfigLoader::getHorizonBlendDegrees();
+    const float opaquePercent = ConfigLoader::getHorizonBlendOpaquePercent();
     s_arcs.clear();
     for (int arc = 0; arc < K_ARCS; ++arc) {
         RE::NiBound bound {};
-        auto* const arcData = buildArcGeometry(arc, degrees, bound);
+        auto* const arcData = buildArcGeometry(arc, degrees, opaquePercent / 100.0F, bound);
         if (arcData == nullptr) {
             s_arcs.clear();
             s_loadFailed = true;
@@ -865,12 +880,15 @@ auto HorizonBand::loadModel() -> bool
         configureArc(arcShape.get());
     }
 
-    spdlog::info("Horizon blend band built: {} degrees, {} arcs x {} segments x {} rows, rim at {} of far clip",
+    spdlog::info("Horizon blend band built: {} degrees, {}% opaque above the seam, {} arcs x {} segments x {} rows, "
+                 "rim at {} of far clip{}",
                  degrees,
+                 opaquePercent,
                  K_ARCS,
                  K_SEGMENTS / K_ARCS,
                  K_ROWS,
-                 K_FARCLIP_FRACTION);
+                 K_FARCLIP_FRACTION,
+                 ConfigLoader::isHorizonBlendDebug() ? " - DEBUG TINT ON (red band, color matching parked)" : "");
     return true;
 }
 
@@ -943,64 +961,50 @@ void HorizonBand::updateFrame(const RE::NiCamera* camera)
     RE::NiUpdateData updateData {};
     s_model->Update(updateData);
 
-    // Re-tint from the live sky: this is what makes the blend weather-mod independent -
-    // whatever fed the sky this frame (any weather mod, transition, time of day) is what
-    // the water fades into. Two colors, not one: distant water converges to the FOG FAR
-    // color as its fog saturates (vanilla and CS Unified Water alike) while the sky at
-    // the seam shows the HORIZON color, so the band's rows gradient from one to the
-    // other across the seam (see s_rowColors). The actual vertex rewrite happens in the
-    // render hook; here only the targets are computed.
-    // Keep the color-match sample points tracking this frame's camera and band placement
-    computeSampleUVs(camera, scale, cameraPos.z - seamDrop, scale * std::tan(radians));
+    // Debug tint (bHorizonBlendDebug): pure red with the alpha profile intact, so the
+    // band's placement, height, plateau, and fade can be seen against the real horizon.
+    // The matching loop is not fed - there is nothing to match a red band against - so
+    // the correction simply holds. The red is boosted by K_DEBUG_COLOR_SCALE (see
+    // configureArc) to punch through the effect shader's distance fog at the band's range.
+    const bool debugTint = ConfigLoader::isHorizonBlendDebug();
+    if (debugTint) {
+        s_samplesValid.store(false, std::memory_order_release);
+    } else {
+        // Keep the color-match sample points tracking this frame's camera and band placement
+        computeSampleUVs(camera, scale, cameraPos.z - seamDrop, scale * std::tan(radians));
+    }
 
+    // Re-tint in the far water's color: distant water converges to the sky's FOG FAR
+    // color as its fog saturates (vanilla and CS Unified Water alike), and the closed-loop
+    // correction (see captureMatchSamples) trims that prior until the band renders exactly
+    // what the framebuffer showed beneath it - whatever water mod or renderer produced
+    // that color. The band carries no sky color: above the seam its alpha fade lets the
+    // real sky through, so the sky side of the blend is right at every azimuth without
+    // ever being known (see s_bandColor). The actual vertex rewrite happens in the render
+    // hook; here only the target is computed.
     auto* const sky = RE::Sky::GetSingleton();
-    if (sky != nullptr) {
-        const auto& rawHorizon = sky->skyColor[RE::TESWeather::ColorTypes::kHorizon];
+    if (debugTint) {
+        s_bandColor = RE::NiColor {1.0F, 0.0F, 0.0F};
+        s_tintStamp.fetch_add(1, std::memory_order_release);
+    } else if (sky != nullptr) {
         const auto& rawFogFar = sky->skyColor[RE::TESWeather::ColorTypes::kFogFar];
-        // Both endpoint colors are only priors; each closed-loop correction trims its
-        // endpoint until the band renders exactly what the framebuffer showed beneath it
-        // - the sky side matters under CS Linear Lighting, whose per-surface gammas shade
-        // effect geometry differently from the sky dome
-        const RE::NiColor horizon {
-            std::clamp(rawHorizon.red * s_skyCorrection.at(0).load(std::memory_order_relaxed), 0.0F, 1.0F),
-            std::clamp(rawHorizon.green * s_skyCorrection.at(1).load(std::memory_order_relaxed), 0.0F, 1.0F),
-            std::clamp(rawHorizon.blue * s_skyCorrection.at(2).load(std::memory_order_relaxed), 0.0F, 1.0F)};
-        // The fog-far color is only the PRIOR for the water side; the closed-loop
-        // correction (see captureMatchSamples) trims it until the band renders exactly
-        // what the framebuffer showed beneath it - whatever water mod or renderer
-        // produced that color
-        const RE::NiColor fogFar {
+        s_bandColor = RE::NiColor {
             std::clamp(rawFogFar.red * s_waterCorrection.at(0).load(std::memory_order_relaxed), 0.0F, 1.0F),
             std::clamp(rawFogFar.green * s_waterCorrection.at(1).load(std::memory_order_relaxed), 0.0F, 1.0F),
             std::clamp(rawFogFar.blue * s_waterCorrection.at(2).load(std::memory_order_relaxed), 0.0F, 1.0F)};
-        for (int row = 0; row < K_ROWS; ++row) {
-            // Crossfade over the middle third of the band: pure fog-far color below,
-            // pure horizon color above, smoothstepped through the seam row
-            const float t = (2.0F * static_cast<float>(row) / (K_ROWS - 1)) - 1.0F;
-            constexpr float CROSSFADE_HALF_WIDTH = 1.0F / 3.0F;
-            const float x = std::clamp((t + CROSSFADE_HALF_WIDTH) / (2.0F * CROSSFADE_HALF_WIDTH), 0.0F, 1.0F);
-            const float w = x * x * (3.0F - (2.0F * x));
-            s_rowColors.at(row) = RE::NiColor {((1.0F - w) * fogFar.red) + (w * horizon.red),
-                                               ((1.0F - w) * fogFar.green) + (w * horizon.green),
-                                               ((1.0F - w) * fogFar.blue) + (w * horizon.blue)};
-        }
         s_tintStamp.fetch_add(1, std::memory_order_release);
     }
 
     if (!s_loggedFirstFrame && sky != nullptr) {
         s_loggedFirstFrame = true;
-        const auto& horizonColor = sky->skyColor[RE::TESWeather::ColorTypes::kHorizon];
         const auto& fogFarColor = sky->skyColor[RE::TESWeather::ColorTypes::kFogFar];
         spdlog::info("Horizon blend band first frame: far clip {}, world radius {}, camera Z {}, waterline Z {}, "
-                     "seam drop {}, horizon color ({}, {}, {}), fog far color ({}, {}, {})",
+                     "seam drop {}, fog far color ({}, {}, {})",
                      farClip,
                      scale,
                      cameraPos.z,
                      s_waterHeight,
                      seamDrop,
-                     horizonColor.red,
-                     horizonColor.green,
-                     horizonColor.blue,
                      fogFarColor.red,
                      fogFarColor.green,
                      fogFarColor.blue);
