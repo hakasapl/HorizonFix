@@ -234,6 +234,7 @@ void WaterSkirt::removeSkirt()
         }
         s_skirtRoot.reset();
     }
+    s_farWaterDistance.store(0.0F, std::memory_order_release);
 
     // Reset all cached state; the sentinel center forces a full rebuild next time.
     // The map coverage cache goes too: its worldspace pointer would otherwise dangle,
@@ -751,6 +752,7 @@ void WaterSkirt::setMapMenuOpen(bool open)
     // One cull flag on the root hides every tile at once
     if (s_skirtRoot) {
         s_skirtRoot->SetAppCulled(open);
+        s_farWaterDistance.store(open ? 0.0F : effectiveRadius(), std::memory_order_release);
     }
 
     // On close, re-run the full update in case the player fast-traveled from the map
@@ -766,6 +768,8 @@ auto WaterSkirt::effectiveRadius() -> float
     constexpr float CLAMP = 4.0F;
     return std::max(ConfigLoader::getSkirtRadius(), CLAMP * K_TILE_SIZE);
 }
+
+auto WaterSkirt::farWaterDistance() -> float { return s_farWaterDistance.load(std::memory_order_acquire); }
 
 void WaterSkirt::layoutTile(float dx,
                             float dy,
@@ -1065,6 +1069,7 @@ void WaterSkirt::updateSkirt()
     if (s_mapMenuOpen) {
         s_skirtRoot->SetAppCulled(true);
     }
+    s_farWaterDistance.store(s_mapMenuOpen ? 0.0F : effectiveRadius(), std::memory_order_release);
 
     spdlog::info("Water skirt built for {}: {} tiles, radius {}, (NAM3 {:08X}, NAM4 {}, flags {:#x}), skirt height {}, "
                  "template {} verts, donor {} [{}] ({} candidates rejected)",

@@ -19,6 +19,24 @@
 
 using namespace HorizonFix;
 
+/**
+ * @brief How far the far water reaches right now, for renderers that fog the sky
+ *
+ * Community Shaders / Open Shaders resolve this export by name (GetProcAddress on
+ * HorizonFix.dll) and call it every frame from their render thread. A height fog that
+ * fogs the sky at the far clip plane leaves a seam against water that continues to its
+ * own horizon far beyond it, so they fog the sky out to this distance instead. Returns 0
+ * whenever there is no far water (blocklisted worldspace, interior, map menu), which the
+ * caller treats as "fog the sky at the far plane as usual". The name and signature are
+ * the contract; keep both stable.
+ *
+ * @return float Distance in game units, or 0 when there is no far water
+ */
+extern "C" __declspec(dllexport) auto HorizonFix_GetFarWaterDistance() -> float
+{
+    return WaterSkirt::farWaterDistance();
+}
+
 namespace {
 
 /**

@@ -151,6 +151,9 @@ private:
     static inline float s_skirtHeight; /**< World Z the tiles sit at: the worldspace's effective water height */
     static inline std::atomic_bool s_taskPending; /**< Coalesces queueUpdate calls into a single queued task */
     static inline bool s_mapMenuOpen = false; /**< True while the map menu is open and the skirt is force-hidden */
+    static inline std::atomic<float> s_farWaterDistance {
+        0.0F}; /**< How far the far water reaches right now: effectiveRadius while a skirt is built and shown, 0
+                  otherwise. Read from other threads through farWaterDistance() */
     static inline NearWaterCoverage s_nearWater; /**< Live water picture for the current frame (see updateVisibility) */
     static inline NearMapCoverage s_nearMap; /**< Defined-cell picture for the current center block (see updateSkirt) */
 
@@ -236,6 +239,18 @@ public:
      * @return float Radius in game units used for layout
      */
     static auto effectiveRadius() -> float;
+
+    /**
+     * @brief How far the far water reaches right now, in game units
+     *
+     * effectiveRadius() while a skirt is built and shown; 0 in blocklisted worldspaces, interiors,
+     * and while the map menu hides it. Exported to renderers as HorizonFix_GetFarWaterDistance
+     * (main.cpp) so a height fog can fog the sky out to the water's horizon instead of the far
+     * clip plane. Safe to call from any thread.
+     *
+     * @return float The distance, or 0 when there is no far water
+     */
+    static auto farWaterDistance() -> float;
 
     /**
      * @brief Decodes an IEEE 754 half-precision value (how vertex layouts without the
