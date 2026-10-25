@@ -37,6 +37,149 @@ extern "C" __declspec(dllexport) auto HorizonFix_GetFarWaterDistance() -> float
     return WaterSkirt::farWaterDistance();
 }
 
+/**
+ * @brief Shows or hides the horizon blend band at runtime
+ *
+ * For renderers that blend the horizon themselves and want HorizonFix's band mesh out of
+ * the way. Callable from any thread; takes effect within a frame. Independent of the blend
+ * angle: while the angle is 0 (fHorizonBlendDegrees, or HorizonFix_SetHorizonBlendDegrees)
+ * nothing is drawn either way, and the return value tells the caller whether an angle is set
+ * (only meaningful once HorizonFix has loaded). Nothing is persisted: every session starts
+ * with the band shown. The name and signature are the contract; keep both stable.
+ *
+ * @param enabled True to show the band, false to hide it
+ * @return bool True when the blend angle in effect is above 0
+ */
+extern "C" __declspec(dllexport) auto HorizonFix_SetHorizonBandEnabled(bool enabled) -> bool
+{
+    return HorizonBand::setEnabled(enabled);
+}
+
+/**
+ * @brief Sets the water skirt radius at runtime, overriding fWaterSkirtRadius for the session
+ *
+ * Callable from any thread; the skirt is rebuilt at the new size on the main thread within
+ * a frame, and HorizonFix_GetFarWaterDistance follows once it has. Each change re-clones
+ * every tile, so prefer calling it when a value is committed over every frame of a slider
+ * drag (calls within one frame coalesce, and an unchanged value costs nothing). Values
+ * below the skirt's minimum of four LOD32 blocks (524288 units) are raised to it, as in the
+ * INI; NaN and infinities are ignored. The name and signature are the contract; keep both
+ * stable.
+ *
+ * @param radius Radius in game units
+ */
+extern "C" __declspec(dllexport) void HorizonFix_SetWaterSkirtRadius(float radius) { WaterSkirt::setRadius(radius); }
+
+/**
+ * @brief Sets the skirt rim quality at runtime, overriding iWaterSkirtRimQuality for the session
+ *
+ * Same threading and rebuild behavior as HorizonFix_SetWaterSkirtRadius. Clamped to 0-6
+ * like the INI value. The name and signature are the contract; keep both stable.
+ *
+ * @param quality How many times tiles crossing the rim may be quad-split (0-6)
+ */
+extern "C" __declspec(dllexport) void HorizonFix_SetWaterSkirtRimQuality(int quality)
+{
+    WaterSkirt::setRimQuality(quality);
+}
+
+/**
+ * @brief Drops a HorizonFix_SetHorizonBandEnabled override: the band shows again wherever a blend
+ * angle is set
+ *
+ * For renderers whose own setting stops applying (a scene without their override, say), so the
+ * plugin is back on its INI behavior. Same threading as HorizonFix_SetHorizonBandEnabled. The name
+ * and signature are the contract; keep both stable.
+ *
+ * @return bool True when the blend angle in effect is above 0
+ */
+extern "C" __declspec(dllexport) auto HorizonFix_ResetHorizonBand() -> bool { return HorizonBand::setEnabled(true); }
+
+/**
+ * @brief Drops a HorizonFix_SetWaterSkirtRadius override: the skirt goes back to fWaterSkirtRadius
+ *
+ * Same threading and rebuild behavior as HorizonFix_SetWaterSkirtRadius; nothing is rebuilt
+ * when the INI radius already is the one in effect. The name and signature are the contract;
+ * keep both stable.
+ */
+extern "C" __declspec(dllexport) void HorizonFix_ResetWaterSkirtRadius() { WaterSkirt::resetRadius(); }
+
+/**
+ * @brief Drops a HorizonFix_SetWaterSkirtRimQuality override: the skirt goes back to iWaterSkirtRimQuality
+ *
+ * Same threading and rebuild behavior as HorizonFix_SetWaterSkirtRadius. The name and signature
+ * are the contract; keep both stable.
+ */
+extern "C" __declspec(dllexport) void HorizonFix_ResetWaterSkirtRimQuality() { WaterSkirt::resetRimQuality(); }
+
+/**
+ * @brief Sets the horizon blend angle at runtime, overriding fHorizonBlendDegrees for the session
+ *
+ * Callable from any thread; applied on the main thread within a frame by rebuilding the band's
+ * geometry (small buffers, cheap enough to follow a slider). 0 hides the band, and an angle
+ * above 0 builds it even when the INI set none. Clamped to 0-45 like the INI value; NaN and
+ * infinities are ignored. HorizonFix_SetHorizonBandEnabled hides the band independently of
+ * the angle. The name and signature are the contract; keep both stable.
+ *
+ * @param degrees Angular height of the blend above and below the horizon line, in degrees
+ */
+extern "C" __declspec(dllexport) void HorizonFix_SetHorizonBlendDegrees(float degrees)
+{
+    HorizonBand::setDegrees(degrees);
+}
+
+/**
+ * @brief Drops a HorizonFix_SetHorizonBlendDegrees override: the band goes back to fHorizonBlendDegrees
+ *
+ * Same threading as HorizonFix_SetHorizonBlendDegrees. The name and signature are the contract;
+ * keep both stable.
+ */
+extern "C" __declspec(dllexport) void HorizonFix_ResetHorizonBlendDegrees() { HorizonBand::resetDegrees(); }
+
+/**
+ * @brief The horizon blend angle setting, for renderers that offer it in their own UI
+ *
+ * fHorizonBlendDegrees, or the last HorizonFix_SetHorizonBlendDegrees value once the main
+ * thread has applied it (within a frame). Callable from any thread. The name and signature are
+ * the contract; keep both stable.
+ *
+ * @return float Blend angle in degrees (0-45)
+ */
+extern "C" __declspec(dllexport) auto HorizonFix_GetHorizonBlendDegrees() -> float
+{
+    return ConfigLoader::getHorizonBlendDegrees();
+}
+
+/**
+ * @brief The water skirt radius setting, for renderers that offer it in their own UI
+ *
+ * fWaterSkirtRadius, or the last HorizonFix_SetWaterSkirtRadius value once the main thread
+ * has applied it (within a frame), raised to the skirt's minimum of four LOD32 blocks. This
+ * is the setting, not what is drawn right now: HorizonFix_GetFarWaterDistance is the live
+ * reach (0 wherever there is no far water). Callable from any thread. The name and
+ * signature are the contract; keep both stable.
+ *
+ * @return float Radius in game units
+ */
+extern "C" __declspec(dllexport) auto HorizonFix_GetWaterSkirtRadius() -> float
+{
+    return WaterSkirt::effectiveRadius();
+}
+
+/**
+ * @brief The skirt rim quality setting, for renderers that offer it in their own UI
+ *
+ * iWaterSkirtRimQuality, or the last HorizonFix_SetWaterSkirtRimQuality value once the main
+ * thread has applied it (within a frame). Callable from any thread. The name and signature
+ * are the contract; keep both stable.
+ *
+ * @return int Rim quality (0-6)
+ */
+extern "C" __declspec(dllexport) auto HorizonFix_GetWaterSkirtRimQuality() -> int
+{
+    return ConfigLoader::getRimQuality();
+}
+
 namespace {
 
 /**
@@ -69,11 +212,10 @@ void installHooks()
     SkirtCull::AtmosphereUpdateHook::install();
     SkirtDepth::install();
 
-    // The horizon blend band's tint-refresh hook is only needed while the feature is on;
-    // disabled installs leave the effect shader untouched (config is loaded before this)
-    if (ConfigLoader::getHorizonBlendDegrees() > 0.0F) {
-        HorizonBand::installHooks();
-    }
+    // The horizon blend band's tint-refresh hooks go in even when fHorizonBlendDegrees is 0:
+    // a renderer can set an angle at runtime (HorizonFix_SetHorizonBlendDegrees), and the
+    // vtable cannot be patched safely once rendering has started
+    HorizonBand::installHooks();
 }
 
 /**

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace HorizonFix {
@@ -40,7 +41,9 @@ namespace HorizonFix {
  * Lifecycle is tied to the water skirt: ensure() is called whenever the skirt exists (so
  * worldspace gating is inherited), the band attaches under the skirt root (so the map-menu
  * hide and teardown come for free), and updateFrame() runs from the same per-frame hook as
- * the skirt's culling. The whole feature is off unless fHorizonBlendDegrees > 0.
+ * the skirt's culling. Nothing is shown while the blend angle (fHorizonBlendDegrees) is 0;
+ * renderers can change the angle at runtime through setDegrees, which rebuilds the ring, and
+ * hide the band through setEnabled.
  */
 class HorizonBand {
 public:
@@ -91,6 +94,10 @@ private:
     static inline float s_builtDegrees = 0.0F; /**< Blend angle the current ring geometry was built for */
     static inline bool s_loadFailed = false; /**< Donor NIF failed to load; stop retrying for this session */
     static inline bool s_loggedFirstFrame = false; /**< One-shot diagnostic log on the first frame update */
+    static inline std::atomic_bool s_enabled {true}; /**< Runtime show/hide from setEnabled; written from any thread,
+                                                        applied to the model on the main thread (applyEnabled) */
+    static inline std::atomic<float> s_requestedDegrees {
+        std::numeric_limits<float>::quiet_NaN()}; /**< Angle from setDegrees awaiting the main thread; NaN = none */
 
     // Band tint, refreshed each frame: the color the distant water renders in. Its prior
     // is the sky's FOG FAR color - what distant water converges to as its fog saturates,
@@ -185,8 +192,9 @@ public:
     /**
      * @brief Installs the vertex-color refresh hook on the BSEffectShader vtable
      *
-     * Called at plugin load, only when fHorizonBlendDegrees > 0 - a disabled feature
-     * leaves the effect shader untouched.
+     * Called at plugin load even when fHorizonBlendDegrees is 0: a renderer may turn the band
+     * on later through setDegrees, and the vtable cannot be patched safely once rendering has
+     * started. With no band built the hooks only compare each effect pass's name.
      */
     static void installHooks();
 
@@ -222,7 +230,66 @@ public:
      */
     static void updateFrame(const RE::NiCamera* camera);
 
+    /**
+     * @brief Shows or hides the band at runtime (the HorizonFix_SetHorizonBandEnabled export)
+     *
+     * Safe to call from any thread: the state is stored at once and the cull flag flips on
+     * the main thread through the SKSE task queue, so it lands within a frame even while a
+     * menu pauses the game. The toggle only hides or reveals the band: while the blend angle
+     * is 0 nothing is drawn either way (see setDegrees). While hidden the band keeps following
+     * the camera, so it reappears in place.
+     *
+     * @param enabled True to show the band, false to hide it
+     * @return bool True when the blend angle in effect is above 0, i.e. there is a band for the toggle to act on
+     */
+    static auto setEnabled(bool enabled) -> bool;
+
+    /**
+     * @brief Changes the blend angle at runtime (the HorizonFix_SetHorizonBlendDegrees export)
+     *
+     * Safe to call from any thread: the angle is stored at once and applied on the main thread
+     * through the SKSE task queue, rebuilding every arc's geometry at the new angle (small
+     * buffers, cheap enough to follow a slider). 0 hides the band; an angle above 0 builds it
+     * if it did not exist yet. Clamped to 0-45 like the INI value; non-finite values are
+     * rejected.
+     *
+     * @param degrees New blend angle in degrees
+     */
+    static void setDegrees(float degrees);
+
+    /**
+     * @brief Drops a runtime angle and goes back to the INI's fHorizonBlendDegrees (the
+     * HorizonFix_ResetHorizonBlendDegrees export)
+     */
+    static void resetDegrees();
+
 private:
+    /**
+     * @brief Applies a pending setDegrees request; main thread only
+     *
+     * Writes the config, rebuilds the arcs when a built band's angle changes, and re-applies
+     * the cull flag (0 hides the band).
+     *
+     * @return bool True when a request was pending
+     */
+    static auto applyDegrees() -> bool;
+
+    /**
+     * @brief Rebuilds every arc's renderer geometry at a new blend angle; main thread only
+     *
+     * All arcs are built before any is installed, so a failed build leaves the whole ring on
+     * its previous angle rather than mixing two.
+     *
+     * @param degrees Blend angle in degrees (already validated > 0)
+     * @return bool True when the ring now has the new angle
+     */
+    static auto rebuildArcs(float degrees) -> bool;
+
+    /**
+     * @brief Applies s_enabled to the model's cull flag; main thread only
+     */
+    static void applyEnabled();
+
     /**
      * @brief Loads the donor NIF and swaps in the fabricated ring geometry (once per session)
      *

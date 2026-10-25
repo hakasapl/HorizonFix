@@ -16,6 +16,7 @@
 #include <cstring>
 #include <limits>
 #include <numbers>
+#include <utility>
 #include <vector>
 
 using namespace HorizonFix;
@@ -879,6 +880,8 @@ auto HorizonBand::loadModel() -> bool
     for (const auto& arcShape : s_arcs) {
         configureArc(arcShape.get());
     }
+    // A runtime disable may have arrived before the band existed
+    applyEnabled();
 
     spdlog::info("Horizon blend band built: {} degrees, {}% opaque above the seam, {} arcs x {} segments x {} rows, "
                  "rim at {} of far clip{}",
@@ -895,8 +898,11 @@ auto HorizonBand::loadModel() -> bool
 void HorizonBand::ensure(RE::NiNode* skirtRoot,
                          float waterHeight)
 {
+    // A setDegrees call made before SKSE's task queue existed is still waiting
+    applyDegrees();
+
     if (ConfigLoader::getHorizonBlendDegrees() <= 0.0F || skirtRoot == nullptr) {
-        return; // feature disabled (the default)
+        return; // no blend angle, no band
     }
     if (s_loadFailed) {
         return; // donor NIF is missing/broken; already logged once
@@ -928,6 +934,111 @@ void HorizonBand::detach()
     // s_model and s_arcs stay cached: the next ensure() only re-attaches
 }
 
+auto HorizonBand::setEnabled(bool enabled) -> bool
+{
+    const bool configured = ConfigLoader::getHorizonBlendDegrees() > 0.0F;
+    if (s_enabled.exchange(enabled, std::memory_order_acq_rel) != enabled) {
+        spdlog::info("Horizon blend band {} at runtime{}",
+                     enabled ? "enabled" : "disabled",
+                     configured ? "" : " (no effect while the blend angle is 0)");
+        // Cull flags are scene-graph state, which only the main thread may touch. Before
+        // SKSE is initialized there is no queue yet; loadModel applies the stored state then.
+        if (const auto* const tasks = SKSE::GetTaskInterface()) {
+            tasks->AddTask([]() -> void { applyEnabled(); });
+        }
+    }
+    return configured;
+}
+
+void HorizonBand::applyEnabled()
+{
+    // One cull flag on the model root covers every arc, and it survives detach and
+    // re-attach, so this only has to run on a toggle, an angle change, and once after the
+    // model is built. An angle of 0 hides a band that was built at another angle.
+    if (s_model) {
+        s_model->SetAppCulled(!s_enabled.load(std::memory_order_acquire)
+                              || ConfigLoader::getHorizonBlendDegrees() <= 0.0F);
+    }
+}
+
+void HorizonBand::setDegrees(float degrees)
+{
+    if (!std::isfinite(degrees)) {
+        spdlog::warn("Horizon blend: ignored runtime angle {} (not a finite number)", degrees);
+        return;
+    }
+    s_requestedDegrees.store(degrees, std::memory_order_release);
+
+    // Geometry and scene-graph state only change on the main thread. Calls within one frame
+    // queue several tasks, but the first applies the latest angle and the rest find nothing
+    // pending. Before SKSE is initialized there is no queue yet; ensure() applies it then.
+    if (const auto* const tasks = SKSE::GetTaskInterface()) {
+        tasks->AddTask([]() -> void {
+            if (applyDegrees()) {
+                // An angle above 0 may need the band built or attached for the first time
+                WaterSkirt::refreshBand();
+            }
+        });
+    }
+}
+
+void HorizonBand::resetDegrees() { setDegrees(ConfigLoader::getIniHorizonBlendDegrees()); }
+
+auto HorizonBand::applyDegrees() -> bool
+{
+    const float requested
+        = s_requestedDegrees.exchange(std::numeric_limits<float>::quiet_NaN(), std::memory_order_acq_rel);
+    if (std::isnan(requested)) {
+        return false;
+    }
+
+    const float previous = ConfigLoader::getHorizonBlendDegrees();
+    ConfigLoader::setHorizonBlendDegrees(requested);
+    const float degrees = ConfigLoader::getHorizonBlendDegrees();
+    if (degrees != previous) {
+        spdlog::info("Horizon blend angle set to {} degrees at runtime", degrees);
+    }
+
+    // A band not built yet takes the angle when ensure() builds it
+    if (s_model && degrees > 0.0F && degrees != s_builtDegrees) {
+        rebuildArcs(degrees);
+    }
+    applyEnabled();
+    return true;
+}
+
+auto HorizonBand::rebuildArcs(float degrees) -> bool
+{
+    const float opaqueFraction = ConfigLoader::getHorizonBlendOpaquePercent() / 100.0F;
+    std::vector<std::pair<RE::BSGraphics::TriShape*, RE::NiBound>> built;
+    built.reserve(s_arcs.size());
+    for (std::size_t arc = 0; arc < s_arcs.size(); ++arc) {
+        RE::NiBound bound {};
+        auto* const arcData = buildArcGeometry(static_cast<int>(arc), degrees, opaqueFraction, bound);
+        if (arcData == nullptr) {
+            for (const auto& entry : built) {
+                releaseGeometryData(entry.first);
+            }
+            spdlog::warn("Horizon blend: rebuilding arc {} at {} degrees failed, keeping {} degrees",
+                         arc,
+                         degrees,
+                         s_builtDegrees);
+            return false;
+        }
+        built.emplace_back(arcData, bound);
+    }
+
+    for (std::size_t arc = 0; arc < s_arcs.size(); ++arc) {
+        installArcOnShape(s_arcs[arc].get(), built[arc].first, built[arc].second);
+    }
+    s_builtDegrees = degrees;
+
+    // The fresh buffers carry white vertex colors; force every arc to take the current tint
+    // on its next draw rather than waiting for the tint itself to change
+    s_arcTintStamps.fill(s_tintStamp.load(std::memory_order_acquire) - 1U);
+    return true;
+}
+
 void HorizonBand::updateFrame(const RE::NiCamera* camera)
 {
     if (!s_model || s_arcs.empty() || s_model->parent == nullptr) {
@@ -955,7 +1066,7 @@ void HorizonBand::updateFrame(const RE::NiCamera* camera)
     // band sits ~15x closer than the rim, so its waterline drops ~15x the seam's angle.
     // At water level the two placements coincide.
     const auto& cameraPos = camera->world.translate;
-    const float seamDrop = (cameraPos.z - s_waterHeight) * (scale / WaterSkirt::effectiveRadius());
+    const float seamDrop = (cameraPos.z - s_waterHeight) * (scale / WaterSkirt::layoutRadius());
     s_model->local.translate = RE::NiPoint3 {cameraPos.x, cameraPos.y, cameraPos.z - seamDrop};
     s_model->local.scale = scale;
     RE::NiUpdateData updateData {};

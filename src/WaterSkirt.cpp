@@ -752,7 +752,7 @@ void WaterSkirt::setMapMenuOpen(bool open)
     // One cull flag on the root hides every tile at once
     if (s_skirtRoot) {
         s_skirtRoot->SetAppCulled(open);
-        s_farWaterDistance.store(open ? 0.0F : effectiveRadius(), std::memory_order_release);
+        s_farWaterDistance.store(open ? 0.0F : s_layoutRadius, std::memory_order_release);
     }
 
     // On close, re-run the full update in case the player fast-traveled from the map
@@ -769,7 +769,56 @@ auto WaterSkirt::effectiveRadius() -> float
     return std::max(ConfigLoader::getSkirtRadius(), CLAMP * K_TILE_SIZE);
 }
 
+auto WaterSkirt::layoutRadius() -> float { return s_layoutRadius; }
+
 auto WaterSkirt::farWaterDistance() -> float { return s_farWaterDistance.load(std::memory_order_acquire); }
+
+void WaterSkirt::setRadius(float radius)
+{
+    if (!std::isfinite(radius)) {
+        spdlog::warn("Water skirt: ignored runtime radius {} (not a finite number)", radius);
+        return;
+    }
+    s_requestedRadius.store(radius, std::memory_order_release);
+    queueUpdate();
+}
+
+void WaterSkirt::setRimQuality(int quality)
+{
+    s_requestedRimQuality.store(quality, std::memory_order_release);
+    queueUpdate();
+}
+
+void WaterSkirt::resetRadius() { setRadius(ConfigLoader::getIniSkirtRadius()); }
+
+void WaterSkirt::resetRimQuality() { setRimQuality(ConfigLoader::getIniRimQuality()); }
+
+void WaterSkirt::refreshBand()
+{
+    if (s_skirtRoot) {
+        HorizonBand::ensure(s_skirtRoot.get(), s_skirtHeight);
+    }
+}
+
+void WaterSkirt::applyLayoutRequests()
+{
+    // Exchange so each request is applied exactly once; a request arriving after this
+    // point queues an update of its own
+    const float radius = s_requestedRadius.exchange(std::numeric_limits<float>::quiet_NaN(), std::memory_order_acq_rel);
+    if (!std::isnan(radius) && radius != ConfigLoader::getSkirtRadius()) {
+        ConfigLoader::setSkirtRadius(radius);
+        spdlog::info("Water skirt radius set to {} at runtime", radius);
+    }
+
+    const int quality = s_requestedRimQuality.exchange(K_NO_RIM_QUALITY_REQUEST, std::memory_order_acq_rel);
+    if (quality != K_NO_RIM_QUALITY_REQUEST) {
+        const int previous = ConfigLoader::getRimQuality();
+        ConfigLoader::setRimQuality(quality);
+        if (ConfigLoader::getRimQuality() != previous) {
+            spdlog::info("Water skirt rim quality set to {} at runtime", ConfigLoader::getRimQuality());
+        }
+    }
+}
 
 void WaterSkirt::layoutTile(float dx,
                             float dy,
@@ -819,6 +868,10 @@ void WaterSkirt::buildLayout()
 
     const float radius = effectiveRadius();
     const int quality = ConfigLoader::getRimQuality();
+
+    // Remembered so updateSkirt can tell when a runtime change has made this layout stale
+    s_layoutRadius = radius;
+    s_layoutRimQuality = quality;
 
     // Number of whole tiles needed to reach the radius in each direction,
     // plus one so rim tiles that only partially overlap are still considered
@@ -903,6 +956,10 @@ void WaterSkirt::placeTiles(int centerBx,
 
 void WaterSkirt::updateSkirt()
 {
+    // Before any early return, so a runtime layout change always reaches the config even
+    // when no skirt can be built right now (the next build then uses it)
+    applyLayoutRequests();
+
     auto* const tes = RE::TES::GetSingleton();
     if (tes == nullptr) {
         return;
@@ -963,9 +1020,11 @@ void WaterSkirt::updateSkirt()
     const int centerBx = static_cast<int>(std::floor(playerPos.x / K_TILE_SIZE));
     const int centerBy = static_cast<int>(std::floor(playerPos.y / K_TILE_SIZE));
 
-    // Fast path: skirt already exists for this worldspace. Nothing to do if the
-    // player is still in the same block.
-    if (s_skirtWorldSpace == worldSpace && !s_tiles.empty()) {
+    // Fast path: skirt already exists for this worldspace with the current layout
+    // settings (a runtime radius or rim quality change falls through to the full
+    // rebuild). Nothing to do if the player is still in the same block.
+    if (s_skirtWorldSpace == worldSpace && !s_tiles.empty() && s_layoutRadius == effectiveRadius()
+        && s_layoutRimQuality == ConfigLoader::getRimQuality()) {
         if (centerBx == s_centerBx && centerBy == s_centerBy) {
             return;
         }
@@ -1069,7 +1128,7 @@ void WaterSkirt::updateSkirt()
     if (s_mapMenuOpen) {
         s_skirtRoot->SetAppCulled(true);
     }
-    s_farWaterDistance.store(s_mapMenuOpen ? 0.0F : effectiveRadius(), std::memory_order_release);
+    s_farWaterDistance.store(s_mapMenuOpen ? 0.0F : s_layoutRadius, std::memory_order_release);
 
     spdlog::info("Water skirt built for {}: {} tiles, radius {}, (NAM3 {:08X}, NAM4 {}, flags {:#x}), skirt height {}, "
                  "template {} verts, donor {} [{}] ({} candidates rejected)",
@@ -1091,9 +1150,11 @@ void WaterSkirt::queueUpdate()
 {
     // Coalesce: only queue a task if one isn't already pending. The actual work
     // runs on the main thread via the SKSE task queue, where scene-graph access
-    // is safe.
-    if (!s_taskPending.exchange(true)) {
-        SKSE::GetTaskInterface()->AddTask([]() -> void {
+    // is safe. The runtime exports can arrive before SKSE is initialized; with no
+    // queue yet, their pending request simply waits for the first real update.
+    const auto* const tasks = SKSE::GetTaskInterface();
+    if (tasks != nullptr && !s_taskPending.exchange(true)) {
+        tasks->AddTask([]() -> void {
             s_taskPending = false;
             updateSkirt();
         });

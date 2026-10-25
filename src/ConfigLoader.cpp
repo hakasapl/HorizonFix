@@ -18,11 +18,14 @@ void ConfigLoader::loadConfig()
     const auto iniPath = std::filesystem::current_path() / "Data" / "SKSE" / "Plugins" / "HorizonFix.ini";
 
     // Read every key from [General]; each falls back to its default independently
-    s_config.skirtRadius = readIniFloat(iniPath, L"fWaterSkirtRadius", DEFAULT_RADIUS);
-    s_config.rimQuality = std::clamp(
+    s_config.iniSkirtRadius = readIniFloat(iniPath, L"fWaterSkirtRadius", DEFAULT_RADIUS);
+    s_config.iniRimQuality = std::clamp(
         static_cast<int>(readIniFloat(iniPath, L"iWaterSkirtRimQuality", DEFAULT_RIM_QUALITY)), 0, MAX_RIM_QUALITY);
-    s_config.horizonBlendDegrees
+    s_config.skirtRadius = s_config.iniSkirtRadius;
+    s_config.rimQuality = s_config.iniRimQuality;
+    s_config.iniHorizonBlendDegrees
         = std::clamp(readIniFloat(iniPath, L"fHorizonBlendDegrees", DEFAULT_HORIZON_BLEND), 0.0F, MAX_HORIZON_BLEND);
+    s_config.horizonBlendDegrees = s_config.iniHorizonBlendDegrees;
     s_config.horizonBlendOpaquePercent
         = std::clamp(readIniFloat(iniPath, L"fHorizonBlendOpaquePercent", DEFAULT_HORIZON_OPAQUE_PERCENT),
                      0.0F,
@@ -32,9 +35,9 @@ void ConfigLoader::loadConfig()
     s_config.smallWorldAllowlist = readIniStringList(iniPath, L"sSmallWorldAllowlist");
 
     // Log the effective values so user reports include them
-    spdlog::info("Config Loaded: Water Skirt Radius: {}", s_config.skirtRadius);
-    spdlog::info("Config Loaded: Water Skirt Rim Quality: {}", s_config.rimQuality);
-    spdlog::info("Config Loaded: Horizon Blend Degrees: {}", s_config.horizonBlendDegrees);
+    spdlog::info("Config Loaded: Water Skirt Radius: {}", getSkirtRadius());
+    spdlog::info("Config Loaded: Water Skirt Rim Quality: {}", getRimQuality());
+    spdlog::info("Config Loaded: Horizon Blend Degrees: {}", getHorizonBlendDegrees());
     spdlog::info("Config Loaded: Horizon Blend Opaque Percent: {}", s_config.horizonBlendOpaquePercent);
     spdlog::info("Config Loaded: Horizon Blend Debug: {}", s_config.horizonBlendDebug);
     const auto joinList = [](const std::vector<std::string>& list) -> std::string {
@@ -51,11 +54,32 @@ void ConfigLoader::loadConfig()
     spdlog::info("Config Loaded: Small World Allowlist: [{}]", joinList(s_config.smallWorldAllowlist));
 }
 
-auto ConfigLoader::getSkirtRadius() -> float { return s_config.skirtRadius; }
+auto ConfigLoader::getSkirtRadius() -> float { return s_config.skirtRadius.load(std::memory_order_relaxed); }
 
-auto ConfigLoader::getRimQuality() -> int { return s_config.rimQuality; }
+auto ConfigLoader::getRimQuality() -> int { return s_config.rimQuality.load(std::memory_order_relaxed); }
 
-auto ConfigLoader::getHorizonBlendDegrees() -> float { return s_config.horizonBlendDegrees; }
+void ConfigLoader::setSkirtRadius(float radius) { s_config.skirtRadius.store(radius, std::memory_order_relaxed); }
+
+void ConfigLoader::setRimQuality(int quality)
+{
+    s_config.rimQuality.store(std::clamp(quality, 0, MAX_RIM_QUALITY), std::memory_order_relaxed);
+}
+
+auto ConfigLoader::getIniSkirtRadius() -> float { return s_config.iniSkirtRadius; }
+
+auto ConfigLoader::getIniRimQuality() -> int { return s_config.iniRimQuality; }
+
+auto ConfigLoader::getHorizonBlendDegrees() -> float
+{
+    return s_config.horizonBlendDegrees.load(std::memory_order_relaxed);
+}
+
+void ConfigLoader::setHorizonBlendDegrees(float degrees)
+{
+    s_config.horizonBlendDegrees.store(std::clamp(degrees, 0.0F, MAX_HORIZON_BLEND), std::memory_order_relaxed);
+}
+
+auto ConfigLoader::getIniHorizonBlendDegrees() -> float { return s_config.iniHorizonBlendDegrees; }
 
 auto ConfigLoader::getHorizonBlendOpaquePercent() -> float { return s_config.horizonBlendOpaquePercent; }
 

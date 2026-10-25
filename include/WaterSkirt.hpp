@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace HorizonFix {
@@ -152,8 +153,18 @@ private:
     static inline std::atomic_bool s_taskPending; /**< Coalesces queueUpdate calls into a single queued task */
     static inline bool s_mapMenuOpen = false; /**< True while the map menu is open and the skirt is force-hidden */
     static inline std::atomic<float> s_farWaterDistance {
-        0.0F}; /**< How far the far water reaches right now: effectiveRadius while a skirt is built and shown, 0
+        0.0F}; /**< How far the far water reaches right now: s_layoutRadius while a skirt is built and shown, 0
                   otherwise. Read from other threads through farWaterDistance() */
+    static inline float s_layoutRadius
+        = 0.0F; /**< effectiveRadius s_layout was built for; a runtime change makes updateSkirt rebuild */
+    static inline int s_layoutRimQuality
+        = 0; /**< Rim quality s_layout was built for; a runtime change makes updateSkirt rebuild */
+    static constexpr int K_NO_RIM_QUALITY_REQUEST
+        = std::numeric_limits<int>::min(); /**< s_requestedRimQuality value meaning nothing is pending */
+    static inline std::atomic<float> s_requestedRadius {
+        std::numeric_limits<float>::quiet_NaN()}; /**< Radius from setRadius awaiting the main thread; NaN = none */
+    static inline std::atomic<int> s_requestedRimQuality {
+        K_NO_RIM_QUALITY_REQUEST}; /**< Rim quality from setRimQuality awaiting the main thread */
     static inline NearWaterCoverage s_nearWater; /**< Live water picture for the current frame (see updateVisibility) */
     static inline NearMapCoverage s_nearMap; /**< Defined-cell picture for the current center block (see updateSkirt) */
 
@@ -231,19 +242,79 @@ public:
     static void setMapMenuOpen(bool open);
 
     /**
+     * @brief Changes the skirt radius at runtime (the HorizonFix_SetWaterSkirtRadius export)
+     *
+     * Safe to call from any thread. The value is handed to the main thread, where the skirt
+     * update queued right away applies it and rebuilds the skirt at the new size, so it takes
+     * effect within a frame. Calls before that update coalesce into one rebuild with the last
+     * value, and an unchanged value rebuilds nothing. Every change is a full rebuild (all
+     * tiles re-cloned). Non-finite values are rejected.
+     *
+     * @param radius New radius in game units; raised to four tile lengths like the INI value
+     */
+    static void setRadius(float radius);
+
+    /**
+     * @brief Changes the rim quality at runtime (the HorizonFix_SetWaterSkirtRimQuality export)
+     *
+     * Same threading, coalescing, and rebuild behavior as setRadius.
+     *
+     * @param quality New rim subdivision level, clamped to 0-6 like the INI value
+     */
+    static void setRimQuality(int quality);
+
+    /**
+     * @brief Drops a runtime radius and goes back to the INI's fWaterSkirtRadius (the
+     * HorizonFix_ResetWaterSkirtRadius export)
+     *
+     * Same threading and rebuild behavior as setRadius; nothing is rebuilt when the radius in
+     * effect already is the INI's.
+     */
+    static void resetRadius();
+
+    /**
+     * @brief Drops a runtime rim quality and goes back to the INI's iWaterSkirtRimQuality (the
+     * HorizonFix_ResetWaterSkirtRimQuality export)
+     *
+     * Same threading and rebuild behavior as setRadius.
+     */
+    static void resetRimQuality();
+
+    /**
+     * @brief Builds or re-attaches the horizon blend band under the current skirt, if there is one
+     *
+     * For a runtime blend angle change (HorizonBand::setDegrees) that may need the band for the
+     * first time. Main thread only; no-op without a skirt, which builds the band itself later.
+     */
+    static void refreshBand();
+
+    /**
      * @brief The configured skirt radius, clamped to a workable minimum of four tile lengths
      *
-     * Public because the horizon blend band tracks the water-sky seam, which sits at the
-     * skirt's outer rim at exactly this distance.
+     * What the next layout is built for. Safe to call from any thread; exported to renderers
+     * as HorizonFix_GetWaterSkirtRadius (main.cpp).
      *
-     * @return float Radius in game units used for layout
+     * @return float Radius in game units
      */
     static auto effectiveRadius() -> float;
 
     /**
+     * @brief The radius the current skirt was built with, in game units
+     *
+     * Public because the horizon blend band tracks the water-sky seam, which sits at the
+     * skirt's outer rim at exactly this distance. Unlike effectiveRadius it never runs ahead
+     * of the built skirt: after a runtime change, a rebuild that finds no donor yet leaves
+     * the old skirt (and this value) in place until a later update succeeds. Only meaningful
+     * while a skirt exists.
+     *
+     * @return float Radius in game units
+     */
+    static auto layoutRadius() -> float;
+
+    /**
      * @brief How far the far water reaches right now, in game units
      *
-     * effectiveRadius() while a skirt is built and shown; 0 in blocklisted worldspaces, interiors,
+     * layoutRadius() while a skirt is built and shown; 0 in blocklisted worldspaces, interiors,
      * and while the map menu hides it. Exported to renderers as HorizonFix_GetFarWaterDistance
      * (main.cpp) so a height fog can fog the sky out to the water's horizon instead of the far
      * clip plane. Safe to call from any thread.
@@ -265,6 +336,15 @@ public:
     static auto halfToFloat(std::uint16_t half) -> float;
 
 private:
+    /**
+     * @brief Moves pending setRadius/setRimQuality requests into the config
+     *
+     * Runs first thing in updateSkirt, on the main thread where the config is read. The skirt
+     * itself changes when updateSkirt then finds its layout stale (s_layoutRadius,
+     * s_layoutRimQuality) and takes the full rebuild path.
+     */
+    static void applyLayoutRequests();
+
     /**
      * @brief Extracts one column of a rotation matrix as a vector (a world-space basis axis)
      *
